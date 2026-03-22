@@ -50,6 +50,7 @@ jobs:
           python -m pip install ctranslate2
           python -m pip install faster-whisper
           python -m pip install av
+          python -m pip install requests
           python -m pip install pyinstaller==6.11.1
         shell: pwsh
 
@@ -89,7 +90,6 @@ jobs:
             --hidden-import faster_whisper.utils `
             --hidden-import faster_whisper.tokenizer `
             --hidden-import av `
-            --hidden-import numpy `
             --hidden-import torch `
             faster_whisper_cli.py
 
@@ -99,7 +99,7 @@ jobs:
 
       - name: Test build
         run: |
-          $exe = "dist\zsub-engine\faster_whisper_cli.exe"
+          $exe = "dist\zsub-engine\zsub-engine.exe"
           if (Test-Path $exe) {
             Write-Host "EXE bulundu: $exe"
           } else {
@@ -139,6 +139,7 @@ jobs:
           python -m pip install ctranslate2
           python -m pip install faster-whisper
           python -m pip install av
+          python -m pip install requests
           python -m pip install pyinstaller==6.11.1
         shell: pwsh
 
@@ -165,7 +166,6 @@ jobs:
             --hidden-import faster_whisper.utils `
             --hidden-import faster_whisper.tokenizer `
             --hidden-import av `
-            --hidden-import numpy `
             faster_whisper_cli.py
 
           Write-Host "Build tamam"
