@@ -65,7 +65,7 @@ def detect_device(device_arg, compute_arg):
         device = device_arg
 
     if compute_arg == 'auto':
-        compute_type = 'float16' if device == 'cuda' else 'int8'
+        compute_type = 'int8_float16' if device == 'cuda' else 'int8'
     else:
         compute_type = compute_arg
 
@@ -134,29 +134,46 @@ def main():
 
         print(f"[ZSub] Model yüklendi, transkripsiyon başlıyor...", file=sys.stderr)
 
-        segments, info = model.transcribe(
-            args.file,
-            language=args.language if args.language != 'auto' else None,
-            word_timestamps=True,
-            beam_size=5,
+        # Batched mod: CUDA'da 2-4x hız artışı
+        # CPU'da desteklenmiyor
+        use_batched = (device == 'cuda')
 
-            # VAD — sessizlikleri filtrele
-            vad_filter=True,
-            vad_parameters=dict(
-                threshold=0.45,
-                min_speech_duration_ms=250,
-                max_speech_duration_s=float('inf'),
-                min_silence_duration_ms=500,
-                speech_pad_ms=400,
-            ),
-
-            # Hallüsinasyon önleme
-            no_speech_threshold=0.6,
-            compression_ratio_threshold=2.4,
-            log_prob_threshold=-1.0,
-            condition_on_previous_text=True,
-            temperature=0.0,
-        )
+        if use_batched:
+            from faster_whisper import BatchedInferencePipeline
+            pipeline = BatchedInferencePipeline(model=model)
+            segments, info = pipeline.transcribe(
+                args.file,
+                language=args.language if args.language != 'auto' else None,
+                word_timestamps=True,
+                batch_size=16,
+                vad_filter=True,
+                vad_parameters=dict(
+                    threshold=0.45,
+                    min_speech_duration_ms=250,
+                    min_silence_duration_ms=500,
+                    speech_pad_ms=400,
+                ),
+            )
+        else:
+            segments, info = model.transcribe(
+                args.file,
+                language=args.language if args.language != 'auto' else None,
+                word_timestamps=True,
+                beam_size=5,
+                vad_filter=True,
+                vad_parameters=dict(
+                    threshold=0.45,
+                    min_speech_duration_ms=250,
+                    max_speech_duration_s=float('inf'),
+                    min_silence_duration_ms=500,
+                    speech_pad_ms=400,
+                ),
+                no_speech_threshold=0.6,
+                compression_ratio_threshold=2.4,
+                log_prob_threshold=-1.0,
+                condition_on_previous_text=True,
+                temperature=0.0,
+            )
 
         all_words = []
         skipped   = 0
