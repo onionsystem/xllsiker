@@ -27,7 +27,6 @@ jobs:
         run: |
           uname -a
           python --version
-          which python
           python -c "import platform; print(platform.platform()); print(platform.machine())"
 
       - name: Install dependencies
@@ -35,7 +34,7 @@ jobs:
           python -m pip install --upgrade pip wheel setuptools
           python -m pip install numpy==1.26.4
           python -m pip install torch==2.8.0
-          python -m pip install ctranslate2==4.5.0 faster-whisper==1.1.1 av==14.4.0 requests==2.32.3
+          python -m pip install ctranslate2==4.5.0 faster-whisper==1.1.1 av==17.0.0 requests==2.32.3
           python -m pip install pyinstaller==6.11.1
 
       - name: Verify imports
@@ -44,6 +43,8 @@ jobs:
           import torch, ctranslate2, faster_whisper, av, numpy, platform
           print('torch:', torch.__version__)
           print('ctranslate2:', ctranslate2.__version__)
+          print('faster_whisper:', faster_whisper.__version__)
+          print('av:', av.__version__)
           print('platform:', platform.machine())
           print('mps:', getattr(torch.backends, 'mps', None) and torch.backends.mps.is_available())
           "
@@ -104,15 +105,14 @@ jobs:
         run: |
           uname -a
           python --version
-          which python
           python -c "import platform; print(platform.platform()); print(platform.machine())"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip wheel setuptools
           python -m pip install numpy==1.26.4
-          python -m pip install torch==2.8.0
-          python -m pip install ctranslate2==4.5.0 faster-whisper==1.1.1 av==14.4.0 requests==2.32.3
+          python -m pip install torch==2.2.2
+          python -m pip install ctranslate2==4.5.0 faster-whisper==1.1.1 av==17.0.0 requests==2.32.3
           python -m pip install pyinstaller==6.11.1
 
       - name: Verify imports
@@ -121,6 +121,8 @@ jobs:
           import torch, ctranslate2, faster_whisper, av, numpy, platform
           print('torch:', torch.__version__)
           print('ctranslate2:', ctranslate2.__version__)
+          print('faster_whisper:', faster_whisper.__version__)
+          print('av:', av.__version__)
           print('platform:', platform.machine())
           "
 
