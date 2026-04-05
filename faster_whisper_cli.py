@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """
-ZSub Transcription Engine v2.0
+ZSub Transcription Engine v2.1.0
 CLI + HTTP Server modu — Flask bağımlılığı YOK (built-in http.server)
 
 Kullanım:
-  CLI (eski, CEP uyumlu):
+  CLI:
     zsub-engine.exe -m model/ -f audio.wav -l tr -of output
 
-  HTTP Server (yeni, UXP için):
+  HTTP Server:
     zsub-engine.exe --serve -m model/
     zsub-engine.exe --serve -m model/ --port 9876
 """
 
-import sys, os, argparse, json, re, time, tempfile, subprocess, threading
+import sys, os, argparse, json, re, time, tempfile, subprocess, threading, shutil
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 
-ZSUB_VERSION = "2.0.0"
+ZSUB_VERSION = "2.1.0"
 
 SUPPORTED_LANGUAGES = {
     "auto":"Otomatik","tr":"Türkçe","en":"English","de":"Deutsch","fr":"Français",
@@ -35,339 +35,647 @@ SUPPORTED_LANGUAGES = {
     "bs":"Bosanski","is":"Íslenska","mt":"Malti","lb":"Lëtzebuergesch",
 }
 
-# ── Yardımcılar ──
-
-def log(msg): print(f"[ZSub] {msg}", file=sys.stderr)
+def log(msg):
+    print(f"[ZSub] {msg}", file=sys.stderr)
 
 def seconds_to_srt(s):
-    h=int(s//3600); m=int((s%3600)//60); sec=int(s%60); ms=min(999,int(round((s%1)*1000)))
+    h = int(s // 3600)
+    m = int((s % 3600) // 60)
+    sec = int(s % 60)
+    ms = min(999, int(round((s % 1) * 1000)))
     return f"{h:02d}:{m:02d}:{sec:02d},{ms:03d}"
 
 HALLUCINATION_PATTERNS = [
-    r'^\s*$', r'teşekkür ederim\.?\s*$', r'teşekkürler\.?\s*$', r'altyazı\s',
-    r'subtitle', r'transcribed by', r'www\.', r'\.com', r'copyright',
-    r'subtitles?\s+by', r'kanal[ıi]\s+(beğen|abone)', r'beğen(in|meyi unutmayın)', r'abone ol',
+    r'^\s*$',
+    r'teşekkür ederim\.?\s*$',
+    r'teşekkürler\.?\s*$',
+    r'altyazı\s',
+    r'subtitle',
+    r'transcribed by',
+    r'www\.',
+    r'\.com',
+    r'copyright',
+    r'subtitles?\s+by',
+    r'kanal[ıi]\s+(beğen|abone)',
+    r'beğen(in|meyi unutmayın)',
+    r'abone ol',
 ]
 
 def is_hallucination(text):
     t = text.lower().strip()
-    if not t: return True
+    if not t:
+        return True
     return any(re.search(p, t, re.IGNORECASE) for p in HALLUCINATION_PATTERNS)
 
-FILLER_WORDS = {'ıı','ıı.','eee','ee','mmm','mm','hmm','hm','aha','şey','yani','işte','hani','ya','ha','he','ih','uhh','umm','uh','um','ah','oh'}
-FILLER_PROB_THRESHOLD = 0.6; FILLER_DUR_THRESHOLD = 0.4; SILENCE_GAP_THRESHOLD = 0.5; MIN_CUT_DURATION = 0.15
+STRONG_FILLERS = {
+    'ıı', 'ııı', 'ıııı', 'iii',
+    'ee', 'eee', 'eeee',
+    'mm', 'mmm',
+    'hm', 'hmm',
+    'uh', 'uhh', 'um', 'umm',
+    'ah', 'oh', 'ih'
+}
+WEAK_FILLERS = {
+    'şey', 'sey',
+    'yani',
+    'işte', 'iste',
+    'hani',
+    'ya', 'ha', 'he', 'aha'
+}
+
+FILLER_MAX_DUR_STRONG = 0.90
+FILLER_MAX_DUR_WEAK = 0.45
+FILLER_LOW_PROB = 0.72
+SILENCE_GAP_THRESHOLD = 0.35
+MIN_CUT_DURATION = 0.10
+
+def normalize_word(word):
+    w = (word or '').strip().lower()
+    w = re.sub(r'[^\wçğıöşü]+', '', w, flags=re.IGNORECASE)
+    return w
+
+def is_repeated_filler(w):
+    if not w:
+        return False
+    if re.fullmatch(r'[ıi]+', w):
+        return len(w) >= 2
+    if re.fullmatch(r'e+', w):
+        return len(w) >= 2
+    if re.fullmatch(r'm+', w):
+        return len(w) >= 2
+    if re.fullmatch(r'hm+', w):
+        return True
+    return False
+
+def classify_filler(word, dur, prob):
+    w = normalize_word(word)
+
+    if w in STRONG_FILLERS or is_repeated_filler(w):
+        if dur <= FILLER_MAX_DUR_STRONG:
+            return f"filler:{w or 'sound'}"
+
+    if w in WEAK_FILLERS:
+        if dur <= FILLER_MAX_DUR_WEAK and prob <= FILLER_LOW_PROB:
+            return f"filler:{w}"
+
+    return None
 
 def detect_device(device_arg, compute_arg):
     if device_arg == 'auto':
-        try: import torch; device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        except: device = 'cpu'
-    else: device = device_arg
+        try:
+            import torch
+            device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        except Exception:
+            device = 'cpu'
+    else:
+        device = device_arg
+
     compute = ('int8_float16' if device == 'cuda' else 'int8') if compute_arg == 'auto' else compute_arg
     return device, compute
 
 def get_vram_gb():
     try:
         import torch
-        if torch.cuda.is_available(): return torch.cuda.get_device_properties(0).total_memory/(1024**3)
-    except: pass
+        if torch.cuda.is_available():
+            return torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+    except Exception:
+        pass
     return 0
 
 def get_params(device, vram):
-    if device != 'cuda': return dict(beam_size=3,batch_size=1,chunk_len=30,num_workers=1)
-    if vram >= 12: return dict(beam_size=5,batch_size=16,chunk_len=30,num_workers=2)
-    if vram >= 8:  return dict(beam_size=5,batch_size=8,chunk_len=30,num_workers=1)
-    return dict(beam_size=3,batch_size=4,chunk_len=25,num_workers=1)
+    if device != 'cuda':
+        return dict(beam_size=3, batch_size=1, chunk_len=30, num_workers=1)
+    if vram >= 12:
+        return dict(beam_size=5, batch_size=16, chunk_len=30, num_workers=2)
+    if vram >= 8:
+        return dict(beam_size=5, batch_size=8, chunk_len=30, num_workers=1)
+    return dict(beam_size=3, batch_size=4, chunk_len=25, num_workers=1)
 
 def build_srt(words, wpl):
-    if not words: return ""
+    if not words:
+        return ""
+
     subs = []
     for i in range(0, len(words), wpl):
-        g = words[i:i+wpl]
+        g = words[i:i + wpl]
         t = ' '.join(w['word'].strip() for w in g).strip()
-        if not t: continue
-        s,e = g[0]['start'], g[-1]['end']
-        if e <= s: e = s + 0.1
-        subs.append({'start':s,'end':e,'text':t})
-    for j in range(len(subs)-1):
-        if subs[j]['end'] > subs[j+1]['start']-0.08:
-            subs[j]['end'] = max(subs[j]['start']+0.05, subs[j+1]['start']-0.08)
+        if not t:
+            continue
+        s, e = g[0]['start'], g[-1]['end']
+        if e <= s:
+            e = s + 0.1
+        subs.append({'start': s, 'end': e, 'text': t})
+
+    for j in range(len(subs) - 1):
+        if subs[j]['end'] > subs[j + 1]['start'] - 0.08:
+            subs[j]['end'] = max(subs[j]['start'] + 0.05, subs[j + 1]['start'] - 0.08)
+
     lines = []
-    for idx,sub in enumerate(subs,1):
-        lines += [str(idx), f"{seconds_to_srt(sub['start'])} --> {seconds_to_srt(sub['end'])}", sub['text'], '']
+    for idx, sub in enumerate(subs, 1):
+        lines += [
+            str(idx),
+            f"{seconds_to_srt(sub['start'])} --> {seconds_to_srt(sub['end'])}",
+            sub['text'],
+            ''
+        ]
     return '\n'.join(lines)
 
-# ── Model Cache ──
-
-_model = None; _model_path = None; _dev = None; _comp = None
+_model = None
+_model_path = None
+_dev = None
+_comp = None
 
 def load_model(path, device='auto', compute='auto'):
     global _model, _model_path, _dev, _comp
-    if _model and _model_path == path: log("Model cache"); return _model
+
+    if _model and _model_path == path:
+        log("Model cache")
+        return _model
+
     _dev, _comp = detect_device(device, compute)
     vram = get_vram_gb() if _dev == 'cuda' else 0
     p = get_params(_dev, vram)
+
     from faster_whisper import WhisperModel
-    _model = WhisperModel(path, device=_dev, compute_type=_comp, local_files_only=True,
-                          cpu_threads=min(4,os.cpu_count() or 4), num_workers=p['num_workers'])
+    _model = WhisperModel(
+        path,
+        device=_dev,
+        compute_type=_comp,
+        local_files_only=True,
+        cpu_threads=min(4, os.cpu_count() or 4),
+        num_workers=p['num_workers']
+    )
     _model_path = path
     log(f"Model yüklendi | {_dev} vram:{vram:.1f}GB beam:{p['beam_size']}")
     return _model
 
-# ── Ana Transkripsiyon ──
-
 def run_transcription(audio_path, model_path, language='tr', device='auto',
                       compute_type='auto', words_per_line=4, analyze_only=False):
-    if not os.path.exists(model_path): return {'success':False,'error':f'Model yok: {model_path}'}
-    if not os.path.exists(audio_path): return {'success':False,'error':f'Ses yok: {audio_path}'}
+    if not os.path.exists(model_path):
+        return {'success': False, 'error': f'Model yok: {model_path}'}
+    if not os.path.exists(audio_path):
+        return {'success': False, 'error': f'Ses yok: {audio_path}'}
+
     dev, comp = detect_device(device, compute_type)
     vram = get_vram_gb() if dev == 'cuda' else 0
     p = get_params(dev, vram)
     log(f"Device:{dev} Compute:{comp} Lang:{language}")
+
     try:
         model = load_model(model_path, device, compute_type)
-        vad = dict(threshold=0.45,min_speech_duration_ms=250,max_speech_duration_s=float(p['chunk_len']),
-                   min_silence_duration_ms=500,speech_pad_ms=400)
+        vad = dict(
+            threshold=0.45,
+            min_speech_duration_ms=250,
+            max_speech_duration_s=float(p['chunk_len']),
+            min_silence_duration_ms=500,
+            speech_pad_ms=400
+        )
         lang_arg = language if language != 'auto' else None
+
         if dev == 'cuda':
             try:
                 from faster_whisper import BatchedInferencePipeline
                 pipe = BatchedInferencePipeline(model=model)
-                segs,info = pipe.transcribe(audio_path,language=lang_arg,word_timestamps=True,
-                                            batch_size=p['batch_size'],vad_filter=True,vad_parameters=vad)
+                segs, info = pipe.transcribe(
+                    audio_path,
+                    language=lang_arg,
+                    word_timestamps=True,
+                    batch_size=p['batch_size'],
+                    vad_filter=True,
+                    vad_parameters=vad
+                )
                 log("Batched mod")
             except Exception as e:
                 log(f"Batched fail: {e}")
-                segs,info = model.transcribe(audio_path,language=lang_arg,word_timestamps=True,beam_size=p['beam_size'],
-                    vad_filter=True,vad_parameters=vad,no_speech_threshold=0.6,compression_ratio_threshold=2.4,
-                    log_prob_threshold=-1.0,condition_on_previous_text=True,temperature=0.0,chunk_length=p['chunk_len'])
+                segs, info = model.transcribe(
+                    audio_path,
+                    language=lang_arg,
+                    word_timestamps=True,
+                    beam_size=p['beam_size'],
+                    vad_filter=True,
+                    vad_parameters=vad,
+                    no_speech_threshold=0.6,
+                    compression_ratio_threshold=2.4,
+                    log_prob_threshold=-1.0,
+                    condition_on_previous_text=True,
+                    temperature=0.0,
+                    chunk_length=p['chunk_len']
+                )
         else:
-            segs,info = model.transcribe(audio_path,language=lang_arg,word_timestamps=True,beam_size=p['beam_size'],
-                vad_filter=True,vad_parameters=vad,no_speech_threshold=0.6,compression_ratio_threshold=2.4,
-                log_prob_threshold=-1.0,condition_on_previous_text=True,temperature=0.0,chunk_length=p['chunk_len'])
+            segs, info = model.transcribe(
+                audio_path,
+                language=lang_arg,
+                word_timestamps=True,
+                beam_size=p['beam_size'],
+                vad_filter=True,
+                vad_parameters=vad,
+                no_speech_threshold=0.6,
+                compression_ratio_threshold=2.4,
+                log_prob_threshold=-1.0,
+                condition_on_previous_text=True,
+                temperature=0.0,
+                chunk_length=p['chunk_len']
+            )
 
-        detected = getattr(info,'language',language)
-        all_words=[]; cuts=[]; skipped=0; prev_end=0.0
+        detected = getattr(info, 'language', language)
+        all_words = []
+        cuts = []
+        skipped = 0
+        prev_end = 0.0
+
         for seg in segs:
-            if is_hallucination(seg.text): skipped+=1; continue
-            if hasattr(seg,'no_speech_prob') and seg.no_speech_prob>0.6: skipped+=1; continue
-            if not seg.words: continue
-            for w in seg.words:
-                wt=w.word.strip().lower().rstrip('.,!?')
-                if not wt: continue
-                dur=w.end-w.start; prob=getattr(w,'probability',1.0)
-                gap=w.start-prev_end
-                if prev_end>0 and gap>=SILENCE_GAP_THRESHOLD:
-                    cuts.append({'start':round(prev_end,3),'end':round(w.start,3),'reason':'silence','dur':round(gap,3)})
-                if wt in FILLER_WORDS and dur<FILLER_DUR_THRESHOLD and prob<FILLER_PROB_THRESHOLD:
-                    cuts.append({'start':round(w.start,3),'end':round(w.end,3),'reason':f'filler:{wt}','dur':round(dur,3)})
-                    prev_end=w.end; continue
-                all_words.append({'word':w.word,'start':w.start,'end':w.end})
-                prev_end=w.end
+            if is_hallucination(seg.text):
+                skipped += 1
+                continue
+            if hasattr(seg, 'no_speech_prob') and seg.no_speech_prob > 0.6:
+                skipped += 1
+                continue
+            if not seg.words:
+                continue
 
-        cuts=[c for c in cuts if c['dur']>=MIN_CUT_DURATION]
+            for w in seg.words:
+                raw_word = w.word or ''
+                wt = normalize_word(raw_word)
+                if not wt:
+                    continue
+
+                dur = max(0.0, w.end - w.start)
+                prob = float(getattr(w, 'probability', 1.0) or 1.0)
+                gap = max(0.0, w.start - prev_end)
+
+                if prev_end > 0 and gap >= SILENCE_GAP_THRESHOLD:
+                    cuts.append({
+                        'start': round(prev_end, 3),
+                        'end': round(w.start, 3),
+                        'reason': 'silence',
+                        'dur': round(gap, 3)
+                    })
+
+                filler_reason = classify_filler(raw_word, dur, prob)
+                if filler_reason:
+                    cuts.append({
+                        'start': round(w.start, 3),
+                        'end': round(w.end, 3),
+                        'reason': filler_reason,
+                        'dur': round(dur, 3),
+                        'prob': round(prob, 3),
+                        'word': raw_word.strip()
+                    })
+                    prev_end = w.end
+                    continue
+
+                all_words.append({
+                    'word': w.word,
+                    'start': w.start,
+                    'end': w.end
+                })
+                prev_end = w.end
+
+        cuts = [c for c in cuts if c['dur'] >= MIN_CUT_DURATION]
         log(f"{len(all_words)} kelime | {skipped} atlandı | {len(cuts)} kesim")
 
-        out_base=os.path.splitext(audio_path)[0]
-        cuts_path=out_base+'.cuts.json'
-        with open(cuts_path,'w',encoding='utf-8') as f: json.dump(cuts,f,ensure_ascii=False,indent=2)
+        out_base = os.path.splitext(audio_path)[0]
+        cuts_path = out_base + '.cuts.json'
+        with open(cuts_path, 'w', encoding='utf-8') as f:
+            json.dump(cuts, f, ensure_ascii=False, indent=2)
 
-        result={'success':True,'cuts_path':cuts_path,'cuts':cuts,'word_count':len(all_words),
-                'cut_count':len(cuts),'segments_skipped':skipped,'detected_language':detected,
-                'srt_path':None,'error':None}
-        if analyze_only: return result
-        if not all_words: result['success']=False; result['error']='Kelime yok'; return result
+        result = {
+            'success': True,
+            'cuts_path': cuts_path,
+            'cuts': cuts,
+            'word_count': len(all_words),
+            'cut_count': len(cuts),
+            'segments_skipped': skipped,
+            'detected_language': detected,
+            'srt_path': None,
+            'error': None
+        }
 
-        srt_path=out_base+'.srt'
-        with open(srt_path,'w',encoding='utf-8') as f: f.write(build_srt(all_words,words_per_line))
-        result['srt_path']=srt_path; log(f"SRT: {srt_path}")
+        if analyze_only:
+            return result
+
+        if not all_words:
+            result['success'] = False
+            result['error'] = 'Kelime yok'
+            return result
+
+        srt_path = out_base + '.srt'
+        with open(srt_path, 'w', encoding='utf-8') as f:
+            f.write(build_srt(all_words, words_per_line))
+        result['srt_path'] = srt_path
+        log(f"SRT: {srt_path}")
         return result
-    except Exception as e:
-        import traceback; traceback.print_exc(file=sys.stderr)
-        return {'success':False,'error':str(e)}
 
-# ── Basit Sessizlik Tespiti (AI gerekmez) ──
+    except Exception as e:
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        return {'success': False, 'error': str(e)}
 
 def detect_silence_simple(audio_path, threshold_db=-35, min_silence_ms=500,
                           min_cut_duration=0.15, ffmpeg_path=None):
-    if not ffmpeg_path: ffmpeg_path=find_ffmpeg()
-    if not ffmpeg_path: return {'success':False,'error':'FFmpeg yok'}
-    if not os.path.exists(audio_path): return {'success':False,'error':'Dosya yok'}
-    cmd=[ffmpeg_path,'-i',audio_path,'-af',
-         f'silencedetect=noise={threshold_db}dB:d={min_silence_ms/1000.0}','-f','null','-']
-    try:
-        r=subprocess.run(cmd,capture_output=True,text=True,timeout=120)
-        cuts=[]; s_start=None
-        for line in r.stderr.split('\n'):
-            m=re.search(r'silence_start:\s*([\d.]+)',line)
-            if m: s_start=float(m.group(1)); continue
-            m=re.search(r'silence_end:\s*([\d.]+)',line)
-            if m and s_start is not None:
-                s_end=float(m.group(1)); dur=s_end-s_start; pad=0.05
-                if dur-pad*2>=min_cut_duration:
-                    cuts.append({'start':round(s_start+pad,3),'end':round(s_end-pad,3),
-                                 'reason':'silence','dur':round(dur-pad*2,3)})
-                s_start=None
-        log(f"Sessizlik: {len(cuts)} bölge ({threshold_db}dB)")
-        return {'success':True,'cuts':cuts,'cut_count':len(cuts)}
-    except subprocess.TimeoutExpired: return {'success':False,'error':'Timeout'}
-    except Exception as e: return {'success':False,'error':str(e)}
+    if not ffmpeg_path:
+        ffmpeg_path = find_ffmpeg()
+    if not ffmpeg_path:
+        return {'success': False, 'error': 'FFmpeg yok'}
+    if not os.path.exists(audio_path):
+        return {'success': False, 'error': 'Dosya yok'}
 
-# ── FFmpeg ──
+    cmd = [
+        ffmpeg_path, '-i', audio_path, '-af',
+        f'silencedetect=noise={threshold_db}dB:d={min_silence_ms/1000.0}',
+        '-f', 'null', '-'
+    ]
+
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        cuts = []
+        s_start = None
+
+        for line in r.stderr.split('\n'):
+            m = re.search(r'silence_start:\s*([\d.]+)', line)
+            if m:
+                s_start = float(m.group(1))
+                continue
+
+            m = re.search(r'silence_end:\s*([\d.]+)', line)
+            if m and s_start is not None:
+                s_end = float(m.group(1))
+                dur = s_end - s_start
+                pad = 0.05
+                if dur - pad * 2 >= min_cut_duration:
+                    cuts.append({
+                        'start': round(s_start + pad, 3),
+                        'end': round(s_end - pad, 3),
+                        'reason': 'silence',
+                        'dur': round(dur - pad * 2, 3)
+                    })
+                s_start = None
+
+        log(f"Sessizlik: {len(cuts)} bölge ({threshold_db}dB)")
+        return {'success': True, 'cuts': cuts, 'cut_count': len(cuts)}
+    except subprocess.TimeoutExpired:
+        return {'success': False, 'error': 'Timeout'}
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
 
 def find_ffmpeg():
-    d=os.path.dirname(os.path.abspath(sys.argv[0]))
-    for c in [os.path.join(d,'ffmpeg.exe'),os.path.join(d,'..','ffmpeg.exe'),os.path.join(d,'..','..','ffmpeg.exe')]:
-        if os.path.exists(c): return os.path.abspath(c)
-    import shutil; return shutil.which('ffmpeg')
+    d = os.path.dirname(os.path.abspath(sys.argv[0]))
+    for c in [
+        os.path.join(d, 'ffmpeg.exe'),
+        os.path.join(d, '..', 'ffmpeg.exe'),
+        os.path.join(d, '..', '..', 'ffmpeg.exe')
+    ]:
+        if os.path.exists(c):
+            return os.path.abspath(c)
+    return shutil.which('ffmpeg')
 
 def prepare_audio(clips, total_duration, output_path, ffmpeg_path=None):
-    if not ffmpeg_path: ffmpeg_path=find_ffmpeg()
-    if not ffmpeg_path: return {'success':False,'error':'FFmpeg yok'}
-    if not clips: return {'success':False,'error':'Klip yok'}
-    td=float(total_duration)
-    if td<=0.1:
-        for c in clips:
-            e=float(c['timelineStart'])+float(c['sourceDuration'])
-            if e>td: td=e
-        td+=1.0
-    if td>36000: td=60.0
-    tmp=os.path.dirname(output_path) or tempfile.gettempdir(); ts=int(time.time()*1000)
-    try:
-        sil=os.path.join(tmp,f'silence_{ts}.wav')
-        subprocess.run([ffmpeg_path,'-y','-f','lavfi','-t',f'{td:.3f}','-i','anullsrc=r=16000:cl=mono',
-                        '-acodec','pcm_s16le','-ar','16000','-ac','1',sil],capture_output=True,timeout=60)
-        cur=sil
-        for i,clip in enumerate(clips):
-            nxt=os.path.join(tmp,f'mix_{ts}_{i}.wav')
-            dms=max(0,round(float(clip['timelineStart'])*1000))
-            fc=f'[1:a]aformat=sample_rates=16000:channel_layouts=mono,adelay={dms}:all=1[d];[0:a][d]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[out]'
-            r=subprocess.run([ffmpeg_path,'-y','-i',cur,'-ss',str(clip['sourceIn']),'-t',str(clip['sourceDuration']),
-                              '-i',clip['path'],'-filter_complex',fc,'-map','[out]','-acodec','pcm_s16le',
-                              '-ar','16000','-ac','1',nxt],capture_output=True,timeout=120)
-            if i>0 and os.path.exists(cur):
-                try: os.remove(cur)
-                except: pass
-            if r.returncode!=0: log(f"Klip {i} hata, skip"); continue
-            cur=nxt
-            if i%20==0: log(f"Ses: {i}/{len(clips)}")
-        if os.path.exists(cur) and cur!=output_path:
-            import shutil; shutil.move(cur,output_path)
-        if os.path.exists(sil):
-            try: os.remove(sil)
-            except: pass
-        log(f"Ses birleştirildi: {len(clips)} klip")
-        return {'success':True,'output_path':output_path}
-    except subprocess.TimeoutExpired: return {'success':False,'error':'Timeout'}
-    except Exception as e: return {'success':False,'error':str(e)}
+    if not ffmpeg_path:
+        ffmpeg_path = find_ffmpeg()
+    if not ffmpeg_path:
+        return {'success': False, 'error': 'FFmpeg yok'}
+    if not clips:
+        return {'success': False, 'error': 'Klip yok'}
 
-# ── HTTP Server ──
+    td = float(total_duration)
+    if td <= 0.1:
+        for c in clips:
+            e = float(c['timelineStart']) + float(c['sourceDuration'])
+            if e > td:
+                td = e
+        td += 1.0
+    if td > 36000:
+        td = 60.0
+
+    tmp = os.path.dirname(output_path) or tempfile.gettempdir()
+    ts = int(time.time() * 1000)
+
+    try:
+        sil = os.path.join(tmp, f'silence_{ts}.wav')
+        subprocess.run([
+            ffmpeg_path, '-y', '-f', 'lavfi', '-t', f'{td:.3f}',
+            '-i', 'anullsrc=r=16000:cl=mono',
+            '-acodec', 'pcm_s16le', '-ar', '16000', '-ac', '1', sil
+        ], capture_output=True, timeout=60)
+
+        cur = sil
+        for i, clip in enumerate(clips):
+            nxt = os.path.join(tmp, f'mix_{ts}_{i}.wav')
+            dms = max(0, round(float(clip['timelineStart']) * 1000))
+            fc = (
+                f'[1:a]aformat=sample_rates=16000:channel_layouts=mono,'
+                f'adelay={dms}:all=1[d];'
+                f'[0:a][d]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[out]'
+            )
+            r = subprocess.run([
+                ffmpeg_path, '-y',
+                '-i', cur,
+                '-ss', str(clip['sourceIn']),
+                '-t', str(clip['sourceDuration']),
+                '-i', clip['path'],
+                '-filter_complex', fc,
+                '-map', '[out]',
+                '-acodec', 'pcm_s16le',
+                '-ar', '16000',
+                '-ac', '1',
+                nxt
+            ], capture_output=True, timeout=120)
+
+            if i > 0 and os.path.exists(cur):
+                try:
+                    os.remove(cur)
+                except Exception:
+                    pass
+
+            if r.returncode != 0:
+                log(f"Klip {i} hata, skip")
+                continue
+
+            cur = nxt
+            if i % 20 == 0:
+                log(f"Ses: {i}/{len(clips)}")
+
+        if os.path.exists(cur) and cur != output_path:
+            shutil.move(cur, output_path)
+
+        if os.path.exists(sil):
+            try:
+                os.remove(sil)
+            except Exception:
+                pass
+
+        log(f"Ses birleştirildi: {len(clips)} klip")
+        return {'success': True, 'output_path': output_path}
+    except subprocess.TimeoutExpired:
+        return {'success': False, 'error': 'Timeout'}
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
 
 class ZSubHandler(BaseHTTPRequestHandler):
-    model_path=None; device='auto'; compute_type='auto'; model_loaded=False; ffmpeg_path=None
+    model_path = None
+    device = 'auto'
+    compute_type = 'auto'
+    model_loaded = False
+    ffmpeg_path = None
 
-    def log_message(self,fmt,*a): log(f"HTTP {a[0] if a else ''}")
+    def log_message(self, fmt, *a):
+        log(f"HTTP {a[0] if a else ''}")
 
-    def _json(self,data,status=200):
-        body=json.dumps(data,ensure_ascii=False).encode('utf-8')
+    def _json(self, data, status=200):
+        body = json.dumps(data, ensure_ascii=False).encode('utf-8')
         self.send_response(status)
-        self.send_header('Content-Type','application/json; charset=utf-8')
-        self.send_header('Content-Length',len(body))
-        self.send_header('Access-Control-Allow-Origin','*')
-        self.send_header('Access-Control-Allow-Methods','GET,POST,OPTIONS')
-        self.send_header('Access-Control-Allow-Headers','Content-Type')
-        self.end_headers(); self.wfile.write(body)
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.send_header('Content-Length', len(body))
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.end_headers()
+        self.wfile.write(body)
 
     def _body(self):
-        l=int(self.headers.get('Content-Length',0))
+        l = int(self.headers.get('Content-Length', 0))
         return json.loads(self.rfile.read(l).decode('utf-8')) if l else {}
 
     def do_OPTIONS(self):
         self.send_response(204)
-        for h,v in [('Access-Control-Allow-Origin','*'),('Access-Control-Allow-Methods','GET,POST,OPTIONS'),
-                     ('Access-Control-Allow-Headers','Content-Type')]:
-            self.send_header(h,v)
+        for h, v in [
+            ('Access-Control-Allow-Origin', '*'),
+            ('Access-Control-Allow-Methods', 'GET,POST,OPTIONS'),
+            ('Access-Control-Allow-Headers', 'Content-Type')
+        ]:
+            self.send_header(h, v)
         self.end_headers()
 
     def do_GET(self):
-        p=urlparse(self.path).path
-        if p=='/health':
-            self._json({'status':'ok','version':ZSUB_VERSION,'model_loaded':self.model_loaded,
-                         'device':_dev or self.device,'compute_type':_comp or self.compute_type,
-                         'vram_gb':round(get_vram_gb(),1),'ffmpeg':self.ffmpeg_path is not None})
-        elif p=='/version': self._json({'version':ZSUB_VERSION})
-        elif p=='/languages': self._json({'languages':SUPPORTED_LANGUAGES,'count':len(SUPPORTED_LANGUAGES)})
-        else: self._json({'error':'404'},404)
+        p = urlparse(self.path).path
+        if p == '/health':
+            self._json({
+                'status': 'ok',
+                'version': ZSUB_VERSION,
+                'model_loaded': self.model_loaded,
+                'device': _dev or self.device,
+                'compute_type': _comp or self.compute_type,
+                'vram_gb': round(get_vram_gb(), 1),
+                'ffmpeg': self.ffmpeg_path is not None
+            })
+        elif p == '/version':
+            self._json({'version': ZSUB_VERSION})
+        elif p == '/languages':
+            self._json({'languages': SUPPORTED_LANGUAGES, 'count': len(SUPPORTED_LANGUAGES)})
+        else:
+            self._json({'error': '404'}, 404)
 
     def do_POST(self):
-        p=urlparse(self.path).path
-        try: d=self._body()
-        except Exception as e: self._json({'success':False,'error':str(e)},400); return
+        p = urlparse(self.path).path
+        try:
+            d = self._body()
+        except Exception as e:
+            self._json({'success': False, 'error': str(e)}, 400)
+            return
 
-        if p=='/prepare-audio':
-            out=d.get('output_path') or os.path.join(tempfile.gettempdir(),f'zsub_{int(time.time())}.wav')
-            self._json(prepare_audio(d.get('clips',[]),d.get('total_duration',0),out,self.ffmpeg_path))
-        elif p=='/transcribe':
-            ap=d.get('audio_path')
-            if not ap: self._json({'success':False,'error':'audio_path gerekli'},400); return
-            self._json(run_transcription(ap,self.model_path,d.get('language','tr'),
-                        self.device,self.compute_type,d.get('words_per_line',4),False))
-        elif p=='/analyze':
-            ap=d.get('audio_path')
-            if not ap: self._json({'success':False,'error':'audio_path gerekli'},400); return
-            self._json(run_transcription(ap,self.model_path,d.get('language','tr'),
-                        self.device,self.compute_type,4,True))
-        elif p=='/cut-by-silence':
-            ap=d.get('audio_path')
-            if not ap: self._json({'success':False,'error':'audio_path gerekli'},400); return
-            self._json(detect_silence_simple(ap,d.get('threshold_db',-35),d.get('min_silence_ms',500),
-                        d.get('min_cut_duration',0.15),self.ffmpeg_path))
-        elif p=='/shutdown':
-            log("Shutdown"); self._json({'status':'shutting_down'})
-            threading.Thread(target=lambda:(time.sleep(0.5),os._exit(0))).start()
-        else: self._json({'error':'404'},404)
+        if p == '/prepare-audio':
+            out = d.get('output_path') or os.path.join(tempfile.gettempdir(), f'zsub_{int(time.time())}.wav')
+            self._json(prepare_audio(d.get('clips', []), d.get('total_duration', 0), out, self.ffmpeg_path))
+        elif p == '/transcribe':
+            ap = d.get('audio_path')
+            if not ap:
+                self._json({'success': False, 'error': 'audio_path gerekli'}, 400)
+                return
+            self._json(run_transcription(
+                ap, self.model_path, d.get('language', 'tr'),
+                self.device, self.compute_type, d.get('words_per_line', 4), False
+            ))
+        elif p == '/analyze':
+            ap = d.get('audio_path')
+            if not ap:
+                self._json({'success': False, 'error': 'audio_path gerekli'}, 400)
+                return
+            self._json(run_transcription(
+                ap, self.model_path, d.get('language', 'tr'),
+                self.device, self.compute_type, 4, True
+            ))
+        elif p == '/cut-by-silence':
+            ap = d.get('audio_path')
+            if not ap:
+                self._json({'success': False, 'error': 'audio_path gerekli'}, 400)
+                return
+            self._json(detect_silence_simple(
+                ap, d.get('threshold_db', -35), d.get('min_silence_ms', 500),
+                d.get('min_cut_duration', 0.15), self.ffmpeg_path
+            ))
+        elif p == '/shutdown':
+            log("Shutdown")
+            self._json({'status': 'shutting_down'})
+            threading.Thread(target=lambda: (time.sleep(0.5), os._exit(0))).start()
+        else:
+            self._json({'error': '404'}, 404)
 
-def run_server(port,model_path,device='auto',compute_type='auto'):
+def run_server(port, model_path, device='auto', compute_type='auto'):
     log(f"Server port:{port}")
-    ml=False
-    try: load_model(model_path,device,compute_type); ml=True; log("Model hazır")
-    except Exception as e: log(f"Model hata: {e}")
-    ff=find_ffmpeg(); log(f"FFmpeg: {ff or 'YOK'}")
-    ZSubHandler.model_path=model_path; ZSubHandler.device=device; ZSubHandler.compute_type=compute_type
-    ZSubHandler.model_loaded=ml; ZSubHandler.ffmpeg_path=ff
-    srv=HTTPServer(('127.0.0.1',port),ZSubHandler)
-    log(f"http://127.0.0.1:{port} — {len(SUPPORTED_LANGUAGES)} dil")
-    try: srv.serve_forever()
-    except KeyboardInterrupt: log("Kapanıyor"); srv.server_close()
+    ml = False
+    try:
+        load_model(model_path, device, compute_type)
+        ml = True
+        log("Model hazır")
+    except Exception as e:
+        log(f"Model hata: {e}")
 
-# ── CLI ──
+    ff = find_ffmpeg()
+    log(f"FFmpeg: {ff or 'YOK'}")
+
+    ZSubHandler.model_path = model_path
+    ZSubHandler.device = device
+    ZSubHandler.compute_type = compute_type
+    ZSubHandler.model_loaded = ml
+    ZSubHandler.ffmpeg_path = ff
+
+    srv = HTTPServer(('127.0.0.1', port), ZSubHandler)
+    log(f"http://127.0.0.1:{port} — {len(SUPPORTED_LANGUAGES)} dil")
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        log("Kapanıyor")
+        srv.server_close()
 
 def run_cli():
-    pa=argparse.ArgumentParser(description='ZSub Engine')
-    pa.add_argument('-m','--model',required=True); pa.add_argument('-f','--file',required=True)
-    pa.add_argument('-l','--language',default='tr'); pa.add_argument('--words-per-line',type=int,default=4)
-    pa.add_argument('-of','--output',required=True); pa.add_argument('--device',default='auto')
-    pa.add_argument('--compute-type',default='auto'); pa.add_argument('--analyze-only',action='store_true')
-    a=pa.parse_args()
-    r=run_transcription(a.file,a.model,a.language,a.device,a.compute_type,a.words_per_line,a.analyze_only)
+    pa = argparse.ArgumentParser(description='ZSub Engine')
+    pa.add_argument('-m', '--model', required=True)
+    pa.add_argument('-f', '--file', required=True)
+    pa.add_argument('-l', '--language', default='tr')
+    pa.add_argument('--words-per-line', type=int, default=4)
+    pa.add_argument('-of', '--output', required=True)
+    pa.add_argument('--device', default='auto')
+    pa.add_argument('--compute-type', default='auto')
+    pa.add_argument('--analyze-only', action='store_true')
+    a = pa.parse_args()
+
+    r = run_transcription(a.file, a.model, a.language, a.device, a.compute_type, a.words_per_line, a.analyze_only)
     if r['success']:
         if r.get('srt_path'):
-            t=a.output+'.srt'
-            if r['srt_path']!=t: import shutil; shutil.move(r['srt_path'],t)
+            t = a.output + '.srt'
+            if r['srt_path'] != t:
+                shutil.move(r['srt_path'], t)
         if r.get('cuts_path'):
-            t=a.output+'.cuts.json'
-            if r['cuts_path']!=t: import shutil; shutil.move(r['cuts_path'],t)
+            t = a.output + '.cuts.json'
+            if r['cuts_path'] != t:
+                shutil.move(r['cuts_path'], t)
         log("TAMAM")
-    else: log(f"HATA: {r.get('error')}"); sys.exit(1)
-
-# ── Main ──
+    else:
+        log(f"HATA: {r.get('error')}")
+        sys.exit(1)
 
 def main():
     if '--serve' in sys.argv:
-        pa=argparse.ArgumentParser()
-        pa.add_argument('--serve',action='store_true'); pa.add_argument('--port',type=int,default=9876)
-        pa.add_argument('-m','--model',required=True); pa.add_argument('--device',default='auto')
-        pa.add_argument('--compute-type',default='auto')
-        a=pa.parse_args(); run_server(a.port,a.model,a.device,a.compute_type)
-    else: run_cli()
+        pa = argparse.ArgumentParser()
+        pa.add_argument('--serve', action='store_true')
+        pa.add_argument('--port', type=int, default=9876)
+        pa.add_argument('-m', '--model', required=True)
+        pa.add_argument('--device', default='auto')
+        pa.add_argument('--compute-type', default='auto')
+        a = pa.parse_args()
+        run_server(a.port, a.model, a.device, a.compute_type)
+    else:
+        run_cli()
 
-if __name__=='__main__': main()
+if __name__ == '__main__':
+    main()
