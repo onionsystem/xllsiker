@@ -16,7 +16,7 @@ import sys, os, argparse, json, re, time, tempfile, subprocess, threading, shuti
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 
-ZSUB_VERSION = "2.1.0"
+ZSUB_VERSION = "2.2.0"
 
 SUPPORTED_LANGUAGES = {
     "auto":"Otomatik","tr":"Türkçe","en":"English","de":"Deutsch","fr":"Français",
@@ -68,12 +68,15 @@ def is_hallucination(text):
     return any(re.search(p, t, re.IGNORECASE) for p in HALLUCINATION_PATTERNS)
 
 STRONG_FILLERS = {
-    'ıı', 'ııı', 'ıııı', 'iii',
+    'ıı', 'ııı', 'ıııı', 'iii', 'iiii',
     'ee', 'eee', 'eeee',
-    'mm', 'mmm',
-    'hm', 'hmm',
-    'uh', 'uhh', 'um', 'umm',
-    'ah', 'oh', 'ih'
+    'aa', 'aaa',
+    'mm', 'mmm', 'mmmm',
+    'hm', 'hmm', 'hmmm',
+    'uh', 'uhh', 'uhhh',
+    'um', 'umm', 'ummm',
+    'ah', 'ahh', 'oh', 'ohh',
+    'eh', 'ehh', 'em', 'ehm', 'erm',
 }
 WEAK_FILLERS = {
     'şey', 'sey',
@@ -83,11 +86,24 @@ WEAK_FILLERS = {
     'ya', 'ha', 'he', 'aha'
 }
 
+# Strong filler: kelime listede + kısa süre + düşük prob
+# Eski hata: prob kontrolü yoktu, whisper "ı" diye normal harf yazınca bile filler sayıyordu
 FILLER_MAX_DUR_STRONG = 0.90
+FILLER_MAX_PROB_STRONG = 0.85   # YENİ: strong'da da prob kontrolü
 FILLER_MAX_DUR_WEAK = 0.45
-FILLER_LOW_PROB = 0.72
+FILLER_LOW_PROB = 0.65
 SILENCE_GAP_THRESHOLD = 0.35
-MIN_CUT_DURATION = 0.10
+MIN_CUT_DURATION = 0.12
+
+# Whisper'a filler'ları transcript ettirmek için initial_prompt
+# Bu sayede whisper "ıı" sesini "bir" yerine gerçekten "ıı" olarak yazar
+FILLER_PROMPTS = {
+    'tr': 'Şey, ıı, eee, hmm, mmm, hani, yani, işte.',
+    'en': 'Um, uh, like, you know, hmm, so, erm.',
+    'de': 'Ähm, äh, hmm, also, halt, ne.',
+    'fr': 'Euh, hein, ben, alors, genre.',
+    'es': 'Em, eh, este, bueno, pues.',
+}
 
 def normalize_word(word):
     w = (word or '').strip().lower()
@@ -110,10 +126,13 @@ def is_repeated_filler(w):
 def classify_filler(word, dur, prob):
     w = normalize_word(word)
 
+    # Strong filler: kelime kesin filler listesinde VEYA tekrarlı ses (ıı, eee, mm)
+    # AMA probability de düşükçe olmalı — yoksa normal kelimeyi filler sayar
     if w in STRONG_FILLERS or is_repeated_filler(w):
-        if dur <= FILLER_MAX_DUR_STRONG:
+        if dur <= FILLER_MAX_DUR_STRONG and prob <= FILLER_MAX_PROB_STRONG:
             return f"filler:{w or 'sound'}"
 
+    # Weak filler: kelime zayıf filler listesinde + kısa süre + düşük prob
     if w in WEAK_FILLERS:
         if dur <= FILLER_MAX_DUR_WEAK and prob <= FILLER_LOW_PROB:
             return f"filler:{w}"
@@ -232,6 +251,10 @@ def run_transcription(audio_path, model_path, language='tr', device='auto',
         )
         lang_arg = language if language != 'auto' else None
 
+        # Filler prompt: whisper'a "bu dolgu seslerini olduğu gibi yaz" demek
+        filler_prompt = FILLER_PROMPTS.get(language, FILLER_PROMPTS.get('default', ''))
+        log(f"Filler prompt: {filler_prompt[:60]}...")
+
         if dev == 'cuda':
             try:
                 from faster_whisper import BatchedInferencePipeline
@@ -242,7 +265,8 @@ def run_transcription(audio_path, model_path, language='tr', device='auto',
                     word_timestamps=True,
                     batch_size=p['batch_size'],
                     vad_filter=True,
-                    vad_parameters=vad
+                    vad_parameters=vad,
+                    initial_prompt=filler_prompt or None
                 )
                 log("Batched mod")
             except Exception as e:
@@ -259,7 +283,8 @@ def run_transcription(audio_path, model_path, language='tr', device='auto',
                     log_prob_threshold=-1.0,
                     condition_on_previous_text=True,
                     temperature=0.0,
-                    chunk_length=p['chunk_len']
+                    chunk_length=p['chunk_len'],
+                    initial_prompt=filler_prompt or None
                 )
         else:
             segs, info = model.transcribe(
@@ -274,7 +299,8 @@ def run_transcription(audio_path, model_path, language='tr', device='auto',
                 log_prob_threshold=-1.0,
                 condition_on_previous_text=True,
                 temperature=0.0,
-                chunk_length=p['chunk_len']
+                chunk_length=p['chunk_len'],
+                initial_prompt=filler_prompt or None
             )
 
         detected = getattr(info, 'language', language)
@@ -282,6 +308,9 @@ def run_transcription(audio_path, model_path, language='tr', device='auto',
         cuts = []
         skipped = 0
         prev_end = 0.0
+
+        # Her filler cut'ı için debug log
+        filler_debug = []
 
         for seg in segs:
             if is_hallucination(seg.text):
@@ -321,6 +350,7 @@ def run_transcription(audio_path, model_path, language='tr', device='auto',
                         'prob': round(prob, 3),
                         'word': raw_word.strip()
                     })
+                    filler_debug.append(f"  FILLER: '{raw_word.strip()}' {w.start:.2f}-{w.end:.2f}s prob:{prob:.2f} dur:{dur:.2f}")
                     prev_end = w.end
                     continue
 
@@ -332,7 +362,11 @@ def run_transcription(audio_path, model_path, language='tr', device='auto',
                 prev_end = w.end
 
         cuts = [c for c in cuts if c['dur'] >= MIN_CUT_DURATION]
-        log(f"{len(all_words)} kelime | {skipped} atlandı | {len(cuts)} kesim")
+        filler_cuts = [c for c in cuts if 'filler' in (c.get('reason') or '')]
+        silence_cuts = [c for c in cuts if c.get('reason') == 'silence']
+        log(f"{len(all_words)} kelime | {skipped} atlandı | {len(cuts)} kesim ({len(filler_cuts)} filler, {len(silence_cuts)} sessizlik)")
+        for fd in filler_debug:
+            log(fd)
 
         out_base = os.path.splitext(audio_path)[0]
         cuts_path = out_base + '.cuts.json'
