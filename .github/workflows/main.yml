@@ -9,9 +9,145 @@ on:
       - '.github/workflows/main.yml'
 
 env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   ZSUB_VERSION: "2.1.0"
 
 jobs:
+  build-win-cuda:
+    name: Windows CUDA x64
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install CUDA 12.8
+        run: |
+          $url = "https://developer.download.nvidia.com/compute/cuda/12.8.0/local_installers/cuda_12.8.0_571.96_windows.exe"
+          $out = "$env:TEMP\cuda.exe"
+          Invoke-WebRequest -Uri $url -OutFile $out -TimeoutSec 300
+          Start-Process $out -ArgumentList @("-s","nvcc_12.8","cudart_12.8","cublas_12.8","cublas_dev_12.8","visual_studio_integration_12.8") -Wait -NoNewWindow
+          $p = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8"
+          echo "CUDA_PATH=$p" >> $env:GITHUB_ENV
+          echo "$p\bin" >> $env:GITHUB_PATH
+        shell: pwsh
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip wheel
+          python -m pip install numpy==1.26.4
+          python -m pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cu128
+          python -m pip install ctranslate2==4.5.0 faster-whisper==1.1.1 av==14.4.0 requests==2.32.3
+          python -m pip install pyinstaller==6.11.1
+        shell: pwsh
+
+      - name: Verify environment
+        run: |
+          python -c "
+          import torch, ctranslate2, faster_whisper
+          print('torch:', torch.__version__)
+          print('ctranslate2:', ctranslate2.__version__)
+          print('cuda:', torch.cuda.is_available())
+          "
+        shell: pwsh
+
+      - name: Build
+        run: |
+          $ct2 = python -c "import ctranslate2, os; print(os.path.dirname(ctranslate2.__file__))"
+          $fw  = python -c "import faster_whisper, os; print(os.path.dirname(faster_whisper.__file__))"
+          $av  = python -c "import av, os; print(os.path.dirname(av.__file__))"
+          $np  = python -c "import numpy, os; print(os.path.dirname(numpy.__file__))"
+
+          pyinstaller --clean --noconfirm --onedir --name zsub-engine `
+            --add-data "$ct2;ctranslate2" `
+            --add-data "$fw;faster_whisper" `
+            --add-data "$av;av" `
+            --add-data "$np;numpy" `
+            --collect-binaries ctranslate2 `
+            --collect-binaries av `
+            --hidden-import ctranslate2 `
+            --hidden-import faster_whisper `
+            --hidden-import faster_whisper.transcribe `
+            --hidden-import faster_whisper.audio `
+            --hidden-import faster_whisper.utils `
+            --hidden-import faster_whisper.tokenizer `
+            --hidden-import av `
+            --hidden-import torch `
+            faster_whisper_cli.py
+        shell: pwsh
+
+      - name: Smoke test
+        run: |
+          if (!(Test-Path "dist\zsub-engine\zsub-engine.exe")) { throw "exe yok" }
+          & "dist\zsub-engine\zsub-engine.exe" --help | Out-Null
+        shell: pwsh
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: zsub-engine-v${{ env.ZSUB_VERSION }}-win-cuda-x64
+          path: dist/zsub-engine/
+          retention-days: 30
+
+  build-win-cpu:
+    name: Windows CPU x64
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip wheel
+          python -m pip install numpy==1.26.4
+          python -m pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install ctranslate2==4.5.0 faster-whisper==1.1.1 av==14.4.0 requests==2.32.3
+          python -m pip install pyinstaller==6.11.1
+        shell: pwsh
+
+      - name: Build
+        run: |
+          $ct2 = python -c "import ctranslate2, os; print(os.path.dirname(ctranslate2.__file__))"
+          $fw  = python -c "import faster_whisper, os; print(os.path.dirname(faster_whisper.__file__))"
+          $av  = python -c "import av, os; print(os.path.dirname(av.__file__))"
+          $np  = python -c "import numpy, os; print(os.path.dirname(numpy.__file__))"
+
+          pyinstaller --clean --noconfirm --onedir --name zsub-engine-cpu `
+            --add-data "$ct2;ctranslate2" `
+            --add-data "$fw;faster_whisper" `
+            --add-data "$av;av" `
+            --add-data "$np;numpy" `
+            --collect-binaries ctranslate2 `
+            --collect-binaries av `
+            --hidden-import ctranslate2 `
+            --hidden-import faster_whisper `
+            --hidden-import faster_whisper.transcribe `
+            --hidden-import faster_whisper.audio `
+            --hidden-import faster_whisper.utils `
+            --hidden-import faster_whisper.tokenizer `
+            --hidden-import av `
+            --hidden-import torch `
+            faster_whisper_cli.py
+        shell: pwsh
+
+      - name: Smoke test
+        run: |
+          if (!(Test-Path "dist\zsub-engine-cpu\zsub-engine-cpu.exe")) { throw "exe yok" }
+          & "dist\zsub-engine-cpu\zsub-engine-cpu.exe" --help | Out-Null
+        shell: pwsh
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: zsub-engine-v${{ env.ZSUB_VERSION }}-win-cpu-x64
+          path: dist/zsub-engine-cpu/
+          retention-days: 30
+
   build-mac-arm64:
     name: macOS arm64
     runs-on: macos-14
@@ -31,7 +167,18 @@ jobs:
           python -m pip install ctranslate2==4.5.0 faster-whisper==1.1.1 av==14.4.0 requests==2.32.3
           python -m pip install pyinstaller==6.11.1
 
-      - name: Build arm64
+      - name: Verify environment
+        run: |
+          python -c "
+          import torch, ctranslate2, faster_whisper, platform
+          print('torch:', torch.__version__)
+          print('ctranslate2:', ctranslate2.__version__)
+          print('faster_whisper:', faster_whisper.__version__)
+          print('machine:', platform.machine())
+          print('mps:', torch.backends.mps.is_available())
+          "
+
+      - name: Build
         run: |
           ct2=$(python -c "import ctranslate2, os; print(os.path.dirname(ctranslate2.__file__))")
           fw=$(python -c "import faster_whisper, os; print(os.path.dirname(faster_whisper.__file__))")
@@ -69,7 +216,7 @@ jobs:
 
   build-mac-intel:
     name: macOS Intel x64
-    runs-on: macos-13
+    runs-on: macos-15-intel
 
     steps:
       - uses: actions/checkout@v5
@@ -86,7 +233,17 @@ jobs:
           python -m pip install ctranslate2==4.5.0 faster-whisper==1.1.1 av==14.4.0 requests==2.32.3
           python -m pip install pyinstaller==6.11.1
 
-      - name: Build intel
+      - name: Verify environment
+        run: |
+          python -c "
+          import torch, ctranslate2, faster_whisper, platform
+          print('torch:', torch.__version__)
+          print('ctranslate2:', ctranslate2.__version__)
+          print('faster_whisper:', faster_whisper.__version__)
+          print('machine:', platform.machine())
+          "
+
+      - name: Build
         run: |
           ct2=$(python -c "import ctranslate2, os; print(os.path.dirname(ctranslate2.__file__))")
           fw=$(python -c "import faster_whisper, os; print(os.path.dirname(faster_whisper.__file__))")
