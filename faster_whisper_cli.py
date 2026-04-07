@@ -68,15 +68,21 @@ def is_hallucination(text):
     return any(re.search(p, t, re.IGNORECASE) for p in HALLUCINATION_PATTERNS)
 
 STRONG_FILLERS = {
-    'ıı', 'ııı', 'ıııı', 'iii', 'iiii',
+    # Tek karakter — whisper bazen "ıı" yerine tek "ı" yazıyor
+    'ı', 'i', 'e', 'a',
+    # Tekrarlı sesli
+    'ıı', 'ııı', 'ıııı', 'ii', 'iii', 'iiii',
     'ee', 'eee', 'eeee',
-    'aa', 'aaa',
+    'aa', 'aaa', 'aaaa',
+    # Nasal
     'mm', 'mmm', 'mmmm',
     'hm', 'hmm', 'hmmm',
+    # İngilizce/evrensel
     'uh', 'uhh', 'uhhh',
     'um', 'umm', 'ummm',
     'ah', 'ahh', 'oh', 'ohh',
     'eh', 'ehh', 'em', 'ehm', 'erm',
+    'ih',
 }
 WEAK_FILLERS = {
     'şey', 'sey',
@@ -86,17 +92,15 @@ WEAK_FILLERS = {
     'ya', 'ha', 'he', 'aha'
 }
 
-# Strong filler: kelime listede + kısa süre + düşük prob
-# Eski hata: prob kontrolü yoktu, whisper "ı" diye normal harf yazınca bile filler sayıyordu
+# Strong filler: kelime listede + kısa süre
+# prob kontrolü YOK — whisper filler'lara da yüksek prob verebiliyor
+# Güvenlik: tek karakter filler'larda (ı, e, a) ek kontrol var (aşağıda)
 FILLER_MAX_DUR_STRONG = 0.90
-FILLER_MAX_PROB_STRONG = 0.85   # YENİ: strong'da da prob kontrolü
 FILLER_MAX_DUR_WEAK = 0.45
 FILLER_LOW_PROB = 0.65
 SILENCE_GAP_THRESHOLD = 0.35
 MIN_CUT_DURATION = 0.12
 
-# Whisper'a filler'ları transcript ettirmek için initial_prompt
-# Bu sayede whisper "ıı" sesini "bir" yerine gerçekten "ıı" olarak yazar
 FILLER_PROMPTS = {
     'tr': 'Şey, ıı, eee, hmm, mmm, hani, yani, işte.',
     'en': 'Um, uh, like, you know, hmm, so, erm.',
@@ -113,12 +117,19 @@ def normalize_word(word):
 def is_repeated_filler(w):
     if not w:
         return False
+    # ı, ıı, ııı... veya i, ii, iii...
     if re.fullmatch(r'[ıi]+', w):
-        return len(w) >= 2
+        return True
+    # e, ee, eee...
     if re.fullmatch(r'e+', w):
+        return True
+    # a, aa, aaa...
+    if re.fullmatch(r'a+', w):
         return len(w) >= 2
+    # m, mm, mmm...
     if re.fullmatch(r'm+', w):
         return len(w) >= 2
+    # hm, hmm, hmmm...
     if re.fullmatch(r'hm+', w):
         return True
     return False
@@ -126,13 +137,20 @@ def is_repeated_filler(w):
 def classify_filler(word, dur, prob):
     w = normalize_word(word)
 
-    # Strong filler: kelime kesin filler listesinde VEYA tekrarlı ses (ıı, eee, mm)
-    # AMA probability de düşükçe olmalı — yoksa normal kelimeyi filler sayar
+    # Strong filler veya tekrarlı ses
     if w in STRONG_FILLERS or is_repeated_filler(w):
-        if dur <= FILLER_MAX_DUR_STRONG and prob <= FILLER_MAX_PROB_STRONG:
+        # Tek karakter (ı, e, a, i) — gerçek kelime de olabilir
+        # Ek güvenlik: prob düşük VEYA süre kısa olmalı
+        if len(w) == 1:
+            if dur <= 0.50 and prob <= 0.92:
+                return f"filler:{w}"
+            return None
+
+        # Çoklu karakter (ıı, eee, hmm vs) — prob kontrolü yok, dur yeterli
+        if dur <= FILLER_MAX_DUR_STRONG:
             return f"filler:{w or 'sound'}"
 
-    # Weak filler: kelime zayıf filler listesinde + kısa süre + düşük prob
+    # Weak filler: şey, yani, işte — düşük prob + kısa süre
     if w in WEAK_FILLERS:
         if dur <= FILLER_MAX_DUR_WEAK and prob <= FILLER_LOW_PROB:
             return f"filler:{w}"
@@ -331,6 +349,10 @@ def run_transcription(audio_path, model_path, language='tr', device='auto',
                 dur = max(0.0, w.end - w.start)
                 prob = float(getattr(w, 'probability', 1.0) or 1.0)
                 gap = max(0.0, w.start - prev_end)
+
+                # DEBUG: her kelimeyi logla (kısa kelimeler ve düşük prob önemli)
+                if dur <= 1.0 and (prob <= 0.90 or len(wt) <= 3):
+                    log(f"  WORD: '{raw_word.strip()}' norm:'{wt}' {w.start:.2f}-{w.end:.2f}s prob:{prob:.2f} dur:{dur:.2f}")
 
                 if prev_end > 0 and gap >= SILENCE_GAP_THRESHOLD:
                     cuts.append({
