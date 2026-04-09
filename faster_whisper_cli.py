@@ -192,9 +192,18 @@ def build_srt(words, wpl):
     if not words:
         return ""
 
-    subs = []
+    # Gruplara böl, ama sonda tek kelime kalırsa öncekiyle birleştir
+    groups = []
     for i in range(0, len(words), wpl):
-        g = words[i:i + wpl]
+        groups.append(words[i:i + wpl])
+
+    # Son grup 1 kelimeyse ve önceki grup varsa → birleştir
+    if len(groups) > 1 and len(groups[-1]) == 1:
+        groups[-2] = groups[-2] + groups[-1]
+        groups.pop()
+
+    subs = []
+    for g in groups:
         t = ' '.join(w['word'].strip() for w in g).strip()
         if not t:
             continue
