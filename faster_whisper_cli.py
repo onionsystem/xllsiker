@@ -36,7 +36,13 @@ SUPPORTED_LANGUAGES = {
 }
 
 def log(msg):
-    print(f"[ZSub] {msg}", file=sys.stderr)
+    try:
+        print(f"[ZSub] {msg}", file=sys.stderr)
+    except (UnicodeEncodeError, OSError):
+        try:
+            print(f"[ZSub] {msg.encode('utf-8', errors='replace').decode('utf-8')}", file=sys.stderr)
+        except Exception:
+            pass
 
 def seconds_to_srt(s):
     h = int(s // 3600)
@@ -109,6 +115,19 @@ FILLER_PROMPTS = {
     'es': 'Em, eh, este, bueno, pues.',
 }
 
+def _get_filler_prompt(lang):
+    prompt = FILLER_PROMPTS.get(lang, FILLER_PROMPTS.get('en', ''))
+    try:
+        _ = prompt.encode('utf-8').decode('utf-8')
+        if any(c in prompt for c in ['ı', 'ş', 'ü', 'U', 'h']):
+            return prompt
+    except Exception:
+        pass
+    if lang == 'tr':
+        return 'Sey, ii, eee, hmm, mmm, hani, yani, iste.'
+    return prompt
+
+# PyInstaller binary'de Türkçe karakter bozulabilir — runtime test
 def normalize_word(word):
     w = (word or '').strip().lower()
     w = re.sub(r'[^\wçğıöşü]+', '', w, flags=re.IGNORECASE)
@@ -279,8 +298,8 @@ def run_transcription(audio_path, model_path, language='tr', device='auto',
         lang_arg = language if language != 'auto' else None
 
         # Filler prompt: whisper'a "bu dolgu seslerini olduğu gibi yaz" demek
-        filler_prompt = FILLER_PROMPTS.get(language, FILLER_PROMPTS.get('default', ''))
-        log(f"Filler prompt: {filler_prompt[:60]}...")
+        filler_prompt = _get_filler_prompt(language)
+        log(f"Filler prompt ({language}): {filler_prompt}")
 
         if dev == 'cuda':
             try:
@@ -730,6 +749,13 @@ def run_cli():
         sys.exit(1)
 
 def main():
+    # PyInstaller Windows binary'de encoding bozulmasını önle
+    import io
+    if hasattr(sys.stderr, 'buffer'):
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+    if hasattr(sys.stdout, 'buffer'):
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+
     if '--serve' in sys.argv:
         pa = argparse.ArgumentParser()
         pa.add_argument('--serve', action='store_true')
