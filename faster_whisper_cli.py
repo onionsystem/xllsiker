@@ -275,7 +275,8 @@ def load_model(path, device='auto', compute='auto'):
     return _model
 
 def run_transcription(audio_path, model_path, language='tr', device='auto',
-                      compute_type='auto', words_per_line=4, analyze_only=False):
+                      compute_type='auto', words_per_line=4, analyze_only=False,
+                      filler_pass=False):
     if not os.path.exists(model_path):
         return {'success': False, 'error': f'Model yok: {model_path}'}
     if not os.path.exists(audio_path):
@@ -284,10 +285,87 @@ def run_transcription(audio_path, model_path, language='tr', device='auto',
     dev, comp = detect_device(device, compute_type)
     vram = get_vram_gb() if dev == 'cuda' else 0
     p = get_params(dev, vram)
-    log(f"Device:{dev} Compute:{comp} Lang:{language}")
+
+    if filler_pass:
+        log(f"=== FILLER PASS === Device:{dev} Lang:{language}")
+    else:
+        log(f"Device:{dev} Compute:{comp} Lang:{language}")
 
     try:
         model = load_model(model_path, device, compute_type)
+
+        lang_arg = language if language != 'auto' else None
+        filler_prompt = _get_filler_prompt(language)
+
+        if filler_pass:
+            # ─── FILLER PASS: VAD kapalı, sadece filler aranıyor ───
+            log(f"Filler pass prompt: {filler_prompt}")
+            segs, info = model.transcribe(
+                audio_path,
+                language=lang_arg,
+                word_timestamps=True,
+                beam_size=p['beam_size'],
+                vad_filter=False,
+                no_speech_threshold=0.6,
+                compression_ratio_threshold=2.4,
+                log_prob_threshold=-1.0,
+                condition_on_previous_text=False,
+                temperature=0.0,
+                chunk_length=p['chunk_len'],
+                initial_prompt=filler_prompt or None
+            )
+
+            detected = getattr(info, 'language', language)
+            filler_cuts = []
+            filler_debug = []
+
+            for seg in segs:
+                if is_hallucination(seg.text):
+                    continue
+                if not seg.words:
+                    continue
+                for w in seg.words:
+                    raw_word = w.word or ''
+                    wt = normalize_word(raw_word)
+                    if not wt:
+                        continue
+                    dur = max(0.0, w.end - w.start)
+                    prob = float(getattr(w, 'probability', 1.0) or 1.0)
+
+                    if dur <= 1.0 and (prob <= 0.90 or len(wt) <= 3):
+                        log(f"  FP-WORD: '{raw_word.strip()}' norm:'{wt}' {w.start:.2f}-{w.end:.2f}s prob:{prob:.2f} dur:{dur:.2f}")
+
+                    filler_reason = classify_filler(raw_word, dur, prob)
+                    if filler_reason:
+                        filler_cuts.append({
+                            'start': round(w.start, 3),
+                            'end': round(w.end, 3),
+                            'reason': filler_reason,
+                            'dur': round(dur, 3),
+                            'prob': round(prob, 3),
+                            'word': raw_word.strip()
+                        })
+                        filler_debug.append(f"  FP-FILLER: '{raw_word.strip()}' {w.start:.2f}-{w.end:.2f}s prob:{prob:.2f} dur:{dur:.2f}")
+
+            log(f"Filler pass sonuc: {len(filler_cuts)} filler bulundu")
+            for fd in filler_debug:
+                log(fd)
+
+            out_base = os.path.splitext(audio_path)[0]
+            filler_path = out_base + '.fillers.json'
+            with open(filler_path, 'w', encoding='utf-8') as f:
+                json.dump(filler_cuts, f, ensure_ascii=False, indent=2)
+
+            return {
+                'success': True,
+                'filler_path': filler_path,
+                'fillers': filler_cuts,
+                'filler_count': len(filler_cuts),
+                'detected_language': detected,
+                'error': None
+            }
+
+        # ─── NORMAL PASS: VAD açık, altyazı + sessizlik tespiti ───
         vad = dict(
             threshold=0.45,
             min_speech_duration_ms=250,
@@ -731,7 +809,21 @@ def run_cli():
     pa.add_argument('--device', default='auto')
     pa.add_argument('--compute-type', default='auto')
     pa.add_argument('--analyze-only', action='store_true')
+    pa.add_argument('--filler-pass', action='store_true', help='VAD kapali filler-only tarama')
     a = pa.parse_args()
+
+    if a.filler_pass:
+        r = run_transcription(a.file, a.model, a.language, a.device, a.compute_type,
+                              a.words_per_line, False, filler_pass=True)
+        if r['success']:
+            t = a.output + '.fillers.json'
+            if r.get('filler_path') and r['filler_path'] != t:
+                shutil.move(r['filler_path'], t)
+            log(f"TAMAM: {r.get('filler_count', 0)} filler")
+        else:
+            log(f"HATA: {r.get('error')}")
+            sys.exit(1)
+        return
 
     r = run_transcription(a.file, a.model, a.language, a.device, a.compute_type, a.words_per_line, a.analyze_only)
     if r['success']:
