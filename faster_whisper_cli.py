@@ -68,7 +68,7 @@ HALLUCINATION_PATTERNS = [
 ]
 
 # ── Cümle sonu noktalama işaretleri (build_srt'de kullanılır) ──
-SENTENCE_END = re.compile(r'[.!?…\u2026]+["\'\u201d\u2019]?$')
+SENTENCE_END = re.compile(r"[.!?]+")
 # Büyük harf başlangıcı + bu kadar gap (sn) → whisper'ın atladığı cümle sınırı
 NEW_SENT_GAP = 0.30
 
@@ -241,7 +241,6 @@ def build_srt(words, wpl):
                 if gap >= NEW_SENT_GAP:
                     is_new_sentence = True
 
-        # Yeni cümle sinyali → mevcut grubu kapat, sıfırla
         if is_new_sentence and current:
             groups.append(current)
             current = []
@@ -249,23 +248,18 @@ def build_srt(words, wpl):
         current.append(w)
 
         if is_sentence_end:
-            # Noktalama → her zaman kes (wpl'den önce bile)
             groups.append(current)
             current = []
         elif len(current) >= wpl:
-            # wpl doldu, noktalama yok → kes
             groups.append(current)
             current = []
 
-    # Kalan kelimeler
     if current:
         if groups and len(current) <= 2:
-            # Az kelime kaldıysa önceki gruba ekle
             groups[-1] = groups[-1] + current
         else:
             groups.append(current)
 
-    # Son grup 1 kelimeyse öncekiyle birleştir
     if len(groups) > 1 and len(groups[-1]) == 1:
         groups[-2] = groups[-2] + groups[-1]
         groups.pop()
@@ -280,15 +274,11 @@ def build_srt(words, wpl):
             e = s + 0.1
         subs.append({'start': s, 'end': e, 'text': t})
 
-    # Gap fix + sessizlikte word-end kırpma
     for j in range(len(subs) - 1):
         gap = subs[j + 1]['start'] - subs[j]['end']
         if gap < 0.08:
-            # Çakışma veya çok yakın → end'i geri çek
             subs[j]['end'] = max(subs[j]['start'] + 0.05, subs[j + 1]['start'] - 0.08)
         elif gap > 0.4:
-            # Uzun sessizlik → whisper'ın ileri aldığı word end'ini sınırla
-            # (kelimenin gerçek süresi + 0.15s max, bir sonraki başından 0.12s önce)
             natural_dur = subs[j]['end'] - subs[j]['start']
             max_end = subs[j]['start'] + natural_dur + 0.15
             subs[j]['end'] = min(subs[j]['end'], max_end, subs[j + 1]['start'] - 0.12)
@@ -357,6 +347,8 @@ def run_transcription(audio_path, model_path, language='tr', device='auto',
 
         if filler_pass:
             # ─── FILLER PASS: VAD kapalı, sadece filler aranıyor ───
+            # no_speech_threshold düşük → whisper "konuşma yok" deyip atlamıyor
+            # chunk_length küçük → kısa ıı/eee seslerini daha iyi segment'e alıyor
             log(f"Filler pass prompt: {filler_prompt}")
             segs, info = model.transcribe(
                 audio_path,
@@ -364,12 +356,12 @@ def run_transcription(audio_path, model_path, language='tr', device='auto',
                 word_timestamps=True,
                 beam_size=p['beam_size'],
                 vad_filter=False,
-                no_speech_threshold=0.6,
+                no_speech_threshold=0.3,          # 0.6 → 0.3: ıı gibi belirsiz sesleri atlama
                 compression_ratio_threshold=2.4,
                 log_prob_threshold=-1.0,
-                condition_on_previous_text=False,
+                condition_on_previous_text=True,   # False → True: context bağlı daha tutarlı yazım
                 temperature=0.0,
-                chunk_length=p['chunk_len'],
+                chunk_length=20,                   # 30 → 20: kısa sesleri daha iyi yakala
                 initial_prompt=filler_prompt or None
             )
 
