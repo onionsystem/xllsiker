@@ -67,6 +67,11 @@ HALLUCINATION_PATTERNS = [
     r'abone ol',
 ]
 
+# ── Cümle sonu noktalama işaretleri (build_srt'de kullanılır) ──
+SENTENCE_END = re.compile(r'[.!?…\u2026]+["\'\u201d\u2019]?$')
+# Büyük harf başlangıcı + bu kadar gap (sn) → whisper'ın atladığı cümle sınırı
+NEW_SENT_GAP = 0.30
+
 def is_hallucination(text):
     t = text.lower().strip()
     if not t:
@@ -208,15 +213,59 @@ def get_params(device, vram):
     return dict(beam_size=3, batch_size=4, chunk_len=25, num_workers=1)
 
 def build_srt(words, wpl):
+    """
+    Kelime listesinden SRT üretir.
+
+    Kırılım önceliği:
+      1. Büyük harf başlangıcı + gap >= NEW_SENT_GAP  → whisper'ın atladığı cümle sınırı
+      2. Noktalama işareti (.!?…)                     → her zaman kes, wpl'den bağımsız
+      3. wpl doldu, noktalama yok                     → kullanıcı tercihi, normal kes
+    """
     if not words:
         return ""
 
-    # Gruplara böl, ama sonda tek kelime kalırsa öncekiyle birleştir
     groups = []
-    for i in range(0, len(words), wpl):
-        groups.append(words[i:i + wpl])
+    current = []
 
-    # Son grup 1 kelimeyse ve önceki grup varsa → birleştir
+    for i, w in enumerate(words):
+        text = w['word'].strip()
+        is_sentence_end = bool(SENTENCE_END.search(text))
+
+        # Büyük harf + yeterli gap → whisper nokta koymadı ama cümle değişti
+        is_new_sentence = False
+        if current and i > 0:
+            prev_text = words[i - 1]['word'].strip()
+            prev_ended = bool(SENTENCE_END.search(prev_text))
+            if not prev_ended and text and text[0].isupper():
+                gap = w['start'] - words[i - 1]['end']
+                if gap >= NEW_SENT_GAP:
+                    is_new_sentence = True
+
+        # Yeni cümle sinyali → mevcut grubu kapat, sıfırla
+        if is_new_sentence and current:
+            groups.append(current)
+            current = []
+
+        current.append(w)
+
+        if is_sentence_end:
+            # Noktalama → her zaman kes (wpl'den önce bile)
+            groups.append(current)
+            current = []
+        elif len(current) >= wpl:
+            # wpl doldu, noktalama yok → kes
+            groups.append(current)
+            current = []
+
+    # Kalan kelimeler
+    if current:
+        if groups and len(current) <= 2:
+            # Az kelime kaldıysa önceki gruba ekle
+            groups[-1] = groups[-1] + current
+        else:
+            groups.append(current)
+
+    # Son grup 1 kelimeyse öncekiyle birleştir
     if len(groups) > 1 and len(groups[-1]) == 1:
         groups[-2] = groups[-2] + groups[-1]
         groups.pop()
@@ -231,9 +280,18 @@ def build_srt(words, wpl):
             e = s + 0.1
         subs.append({'start': s, 'end': e, 'text': t})
 
+    # Gap fix + sessizlikte word-end kırpma
     for j in range(len(subs) - 1):
-        if subs[j]['end'] > subs[j + 1]['start'] - 0.08:
+        gap = subs[j + 1]['start'] - subs[j]['end']
+        if gap < 0.08:
+            # Çakışma veya çok yakın → end'i geri çek
             subs[j]['end'] = max(subs[j]['start'] + 0.05, subs[j + 1]['start'] - 0.08)
+        elif gap > 0.4:
+            # Uzun sessizlik → whisper'ın ileri aldığı word end'ini sınırla
+            # (kelimenin gerçek süresi + 0.15s max, bir sonraki başından 0.12s önce)
+            natural_dur = subs[j]['end'] - subs[j]['start']
+            max_end = subs[j]['start'] + natural_dur + 0.15
+            subs[j]['end'] = min(subs[j]['end'], max_end, subs[j + 1]['start'] - 0.12)
 
     lines = []
     for idx, sub in enumerate(subs, 1):
