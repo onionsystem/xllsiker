@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-“””
-ZSub Transcription Engine v2.1.0
-CLI + HTTP Server modu — Flask bağımlılığı YOK (built-in http.server)
 
-Kullanım:
+# -*- coding: utf-8 -*-
+
+“””
+ZSub Transcription Engine v2.2.0
+CLI + HTTP Server mode (no Flask, built-in http.server)
+
+Usage:
 CLI:
 zsub-engine.exe -m model/ -f audio.wav -l tr -of output
 
@@ -77,7 +80,7 @@ return True
 return any(re.search(p, t, re.IGNORECASE) for p in HALLUCINATION_PATTERNS)
 
 STRONG_FILLERS = {
-# Tek karakter — whisper bazen “ıı” yerine tek “ı” yazıyor
+# Tek karakter – whisper bazen “ıı” yerine tek “ı” yazıyor
 ‘ı’, ‘i’, ‘e’, ‘a’,
 # Tekrarlı sesli
 ‘ıı’, ‘ııı’, ‘ıııı’, ‘ii’, ‘iii’, ‘iiii’,
@@ -103,7 +106,7 @@ WEAK_FILLERS = {
 
 # Strong filler: kelime listede + kısa süre
 
-# prob kontrolü YOK — whisper filler’lara da yüksek prob verebiliyor
+# prob kontrolü YOK – whisper filler’lara da yüksek prob verebiliyor
 
 # Güvenlik: tek karakter filler’larda (ı, e, a) ek kontrol var (aşağıda)
 
@@ -133,7 +136,7 @@ if lang == ‘tr’:
 return ‘Sey, ii, eee, hmm, mmm, hani, yani, iste.’
 return prompt
 
-# PyInstaller binary’de Türkçe karakter bozulabilir — runtime test
+# PyInstaller binary’de Türkçe karakter bozulabilir – runtime test
 
 def normalize_word(word):
 w = (word or ‘’).strip().lower()
@@ -166,18 +169,18 @@ w = normalize_word(word)
 ```
 # Strong filler veya tekrarlı ses
 if w in STRONG_FILLERS or is_repeated_filler(w):
-    # Tek karakter (ı, e, a, i) — gerçek kelime de olabilir
+    # Tek karakter (ı, e, a, i) -- gerçek kelime de olabilir
     # Ek güvenlik: prob düşük VEYA süre kısa olmalı
     if len(w) == 1:
         if dur <= 0.50 and prob <= 0.92:
             return f"filler:{w}"
         return None
 
-    # Çoklu karakter (ıı, eee, hmm vs) — prob kontrolü yok, dur yeterli
+    # Çoklu karakter (ıı, eee, hmm vs) -- prob kontrolü yok, dur yeterli
     if dur <= FILLER_MAX_DUR_STRONG:
         return f"filler:{w or 'sound'}"
 
-# Weak filler: şey, yani, işte — düşük prob + kısa süre
+# Weak filler: şey, yani, işte -- düşük prob + kısa süre
 if w in WEAK_FILLERS:
     if dur <= FILLER_MAX_DUR_WEAK and prob <= FILLER_LOW_PROB:
         return f"filler:{w}"
@@ -385,7 +388,7 @@ try:
 
         # Kesişim: her iki pass'te de ±0.15s toleransla aynı bölge → güvenilir
         # Birleşim: en az birinde çıktıysa → kaçırma (daha liberal)
-        # Seçim: UNION kullan — filler'ı kaçırmak yanlış kesmekten daha kötü
+        # Seçim: UNION kullan -- filler'ı kaçırmak yanlış kesmekten daha kötü
         def _merge_fp_cuts(a, b, tol=0.15):
             merged = list(a)
             for cb in b:
@@ -855,7 +858,7 @@ ZSubHandler.model_loaded = ml
 ZSubHandler.ffmpeg_path = ff
 
 srv = HTTPServer(('127.0.0.1', port), ZSubHandler)
-log(f"http://127.0.0.1:{port} — {len(SUPPORTED_LANGUAGES)} dil")
+log(f"http://127.0.0.1:{port} -- {len(SUPPORTED_LANGUAGES)} dil")
 try:
     srv.serve_forever()
 except KeyboardInterrupt:
