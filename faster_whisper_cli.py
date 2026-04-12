@@ -134,7 +134,7 @@ def _get_filler_prompt(lang):
 # PyInstaller binary'de T\u00fcrk\u00e7e karakter bozulabilir \u2014 runtime test
 def normalize_word(word):
     w = (word or '').strip().lower()
-    w = re.sub('[^\\w\u00e7\u011f\u0131\u00f6\u015f\u00fc]+', '', w, flags=re.IGNORECASE)
+    w = re.sub(r'[^\w\u00e7\u011f\u0131\u00f6\u015f\u00fc]+', '', w, flags=re.IGNORECASE)
     return w
 
 def is_repeated_filler(w):
@@ -369,7 +369,7 @@ def run_transcription(audio_path, model_path, language='tr', device='auto',
             cuts2, _ = _run_fp(0.2, 2)
             log(f"  Pass 2: {len(cuts2)} filler")
 
-            # Union: keep all from pass1, add from pass2 if not already covered
+            # Union: keep all from pass1, add from pass2 not already covered (+-0.15s)
             filler_cuts = list(cuts1)
             for cb in cuts2:
                 already = any(abs(cb['start'] - ca['start']) <= 0.15 and
@@ -410,22 +410,39 @@ def run_transcription(audio_path, model_path, language='tr', device='auto',
         filler_prompt = _get_filler_prompt(language)
         log(f"Filler prompt ({language}): {filler_prompt}")
 
+        # Ses dosyasi hakkinda bilgi topla
+        try:
+            import wave
+            with wave.open(audio_path, 'rb') as wf:
+                audio_duration = wf.getnframes() / wf.getframerate()
+        except Exception:
+            audio_duration = 60.0
+
         if dev == 'cuda':
-            try:
-                from faster_whisper import BatchedInferencePipeline
-                pipe = BatchedInferencePipeline(model=model)
-                segs, info = pipe.transcribe(
-                    audio_path,
-                    language=lang_arg,
-                    word_timestamps=True,
-                    batch_size=min(p['batch_size'], 8),
-                    vad_filter=True,
-                    vad_parameters=vad,
-                    initial_prompt=filler_prompt or None
-                )
-                log("Batched mod")
-            except Exception as e:
-                log(f"Batched fail: {e}")
+            # Batched mod: sadece uzun ve az klipli sesler icin
+            # Kisa/yogun klipli ses (kesilmis timeline) Batched'i bozuyor
+            avg_clip_dur = audio_duration / max(1, p['num_workers'])
+            use_batched = audio_duration > 60.0 and avg_clip_dur > 2.0
+            if use_batched:
+                try:
+                    from faster_whisper import BatchedInferencePipeline
+                    pipe = BatchedInferencePipeline(model=model)
+                    segs, info = pipe.transcribe(
+                        audio_path,
+                        language=lang_arg,
+                        word_timestamps=True,
+                        batch_size=min(p['batch_size'], 8),
+                        vad_filter=True,
+                        vad_parameters=vad,
+                        initial_prompt=filler_prompt or None
+                    )
+                    log(f"Batched mod (dur:{audio_duration:.0f}s)")
+                except Exception as e:
+                    log(f"Batched fail, normal moda geciyor: {e}")
+                    use_batched = False
+
+            if not use_batched:
+                log(f"Normal mod (dur:{audio_duration:.0f}s)")
                 segs, info = model.transcribe(
                     audio_path,
                     language=lang_arg,
@@ -433,7 +450,7 @@ def run_transcription(audio_path, model_path, language='tr', device='auto',
                     beam_size=p['beam_size'],
                     vad_filter=True,
                     vad_parameters=vad,
-                    no_speech_threshold=0.6,
+                    no_speech_threshold=0.4,
                     compression_ratio_threshold=2.4,
                     log_prob_threshold=-1.0,
                     condition_on_previous_text=True,
