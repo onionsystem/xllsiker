@@ -77,108 +77,80 @@ def is_hallucination(text):
         return True
     return any(re.search(p, t, re.IGNORECASE) for p in HALLUCINATION_PATTERNS)
 
-STRONG_FILLERS = {
-    # Tek karakter \u2014 whisper bazen "\u0131\u0131" yerine tek "\u0131" yaz\u0131yor
-    '\u0131', 'i', 'e', 'a',
-    # Tekrarl\u0131 sesli
-    '\u0131\u0131', '\u0131\u0131\u0131', '\u0131\u0131\u0131\u0131', 'ii', 'iii', 'iiii',
+# \u2500\u2500 Filler detection: text-matching, context-aware, no duration heuristics \u2500\u2500
+# Turkce karakter normalizasyonu (\u0131\u2192i, \u015f\u2192s, etc.)
+TR_NORM = str.maketrans(
+    '\u00e7\u011f\u0131\u015f\u00fc\u00f6\u00c7\u011e\u0130\u015e\u00dc\u00d6',
+    'cgisuoCGISUO'
+)
+
+# Kesin dolgu sesleri - hicbir zaman gercek kelime olamaz
+PURE_FILLERS = {
+    'ii', 'iii', 'iiii', 'iiiii',
     'ee', 'eee', 'eeee',
     'aa', 'aaa', 'aaaa',
-    # Nasal
+    'oo', 'ooo', 'uu', 'uuu',
     'mm', 'mmm', 'mmmm',
     'hm', 'hmm', 'hmmm',
-    # \u0130ngilizce/evrensel
     'uh', 'uhh', 'uhhh',
     'um', 'umm', 'ummm',
-    'ah', 'ahh', 'oh', 'ohh',
-    'eh', 'ehh', 'em', 'ehm', 'erm',
-    'ih',
-}
-WEAK_FILLERS = {
-    '\u015fey', 'sey',
-    'yani',
-    'i\u015fte', 'iste',
-    'hani',
-    'ya', 'ha', 'he', 'aha'
+    'ah', 'ahh', 'ahhh',
+    'eh', 'ehh', 'em', 'erm',
+    'ih', 'oh', 'ohh',
+    'i', 'e', 'a',  # tek karakter sesli
 }
 
-# Strong filler: kelime listede + k\u0131sa s\u00fcre
-# prob kontrol\u00fc YOK \u2014 whisper filler'lara da y\u00fcksek prob verebiliyor
-# G\u00fcvenlik: tek karakter filler'larda (\u0131, e, a) ek kontrol var (a\u015fa\u011f\u0131da)
-FILLER_MAX_DUR_STRONG = 0.90
-FILLER_MAX_DUR_WEAK = 0.45
-FILLER_LOW_PROB = 0.65
-SILENCE_GAP_THRESHOLD = 0.35
-MIN_CUT_DURATION = 0.12
+# Baglama gore dolgu - sonraki kelimeye bakarak karar verilir
+WEAK_FILLERS = {'sey', 'yani', 'iste', 'hani'}
 
-FILLER_PROMPTS = {
-    'tr': '\u015eey, \u0131\u0131, eee, hmm, mmm, hani, yani, i\u015fte.',
-    'en': 'Um, uh, like, you know, hmm, so, erm.',
-    'de': '\u00c4hm, \u00e4h, hmm, also, halt, ne.',
-    'fr': 'Euh, hein, ben, alors, genre.',
-    'es': 'Em, eh, este, bueno, pues.',
-}
-
-def _get_filler_prompt(lang):
-    prompt = FILLER_PROMPTS.get(lang, FILLER_PROMPTS.get('en', ''))
-    try:
-        _ = prompt.encode('utf-8').decode('utf-8')
-        if any(c in prompt for c in ['\u0131', '\u015f', '\u00fc', 'U', 'h']):
-            return prompt
-    except Exception:
-        pass
-    if lang == 'tr':
-        return 'Sey, ii, eee, hmm, mmm, hani, yani, iste.'
-    return prompt
-
-# PyInstaller binary'de T\u00fcrk\u00e7e karakter bozulabilir \u2014 runtime test
-def normalize_word(word):
+def _normalize_filler(word):
+    """Kelimeyi dolgu karsilastirmasi icin normalize et."""
     w = (word or '').strip().lower()
-    w = re.sub(r'[^\w\u00e7\u011f\u0131\u00f6\u015f\u00fc]+', '', w, flags=re.IGNORECASE)
+    w = w.translate(TR_NORM)          # Turkce -> ASCII
+    w = re.sub(r'[^\w]+', '', w)     # noktalama temizle
     return w
+
+def _clean_repeat(w):
+    """Uzatilmis hece tekrarlarini ikiye indir: hakiiiiim -> hakiim."""
+    return re.sub(r'(.)\1{2,}', r'\1\1', w)
+
+def classify_filler(word, dur, prob, next_word=None):
+    """
+    Sadece metin tabanli dolgu tespiti.
+    Duration ve probability kontrolu yok - bunlar yaniltici.
+    Tekrarlanan hece uzatmasi (hakiiiiim) gercek kelime olarak korunur.
+    
+    Returns: 'filler:<word>' veya None
+    """
+    norm = _normalize_filler(word)
+    if not norm:
+        return None
+
+    cleaned = _clean_repeat(norm)
+
+    # Pure filler: normalize veya cleaned hali PURE_FILLERS'da
+    if norm in PURE_FILLERS or cleaned in PURE_FILLERS:
+        return f'filler:{norm}'
+
+    # Weak filler: sonraki kelimeye bak
+    if norm in WEAK_FILLERS or cleaned in WEAK_FILLERS:
+        # Sonraki kelime buyuk harfle basliyorsa (yeni cumle) -> koru
+        if next_word and next_word.strip()[:1].isupper():
+            return None
+        return f'filler:{norm}'
+
+    return None
+
+# Legacy compat
+def normalize_word(word):
+    return _normalize_filler(word)
 
 def is_repeated_filler(w):
     if not w:
         return False
-    # \u0131, \u0131\u0131, \u0131\u0131\u0131... veya i, ii, iii...
-    if re.fullmatch(r'[\u0131i]+', w):
-        return True
-    # e, ee, eee...
-    if re.fullmatch(r'e+', w):
-        return True
-    # a, aa, aaa...
-    if re.fullmatch(r'a+', w):
-        return len(w) >= 2
-    # m, mm, mmm...
-    if re.fullmatch(r'm+', w):
-        return len(w) >= 2
-    # hm, hmm, hmmm...
-    if re.fullmatch(r'hm+', w):
-        return True
-    return False
+    cleaned = _clean_repeat(w)
+    return cleaned in PURE_FILLERS
 
-def classify_filler(word, dur, prob):
-    w = normalize_word(word)
-
-    # Strong filler veya tekrarl\u0131 ses
-    if w in STRONG_FILLERS or is_repeated_filler(w):
-        # Tek karakter (\u0131, e, a, i) \u2014 ger\u00e7ek kelime de olabilir
-        # Ek g\u00fcvenlik: prob d\u00fc\u015f\u00fck VEYA s\u00fcre k\u0131sa olmal\u0131
-        if len(w) == 1:
-            if dur <= 0.50 and prob <= 0.92:
-                return f"filler:{w}"
-            return None
-
-        # \u00c7oklu karakter (\u0131\u0131, eee, hmm vs) \u2014 prob kontrol\u00fc yok, dur yeterli
-        if dur <= FILLER_MAX_DUR_STRONG:
-            return f"filler:{w or 'sound'}"
-
-    # Weak filler: \u015fey, yani, i\u015fte \u2014 d\u00fc\u015f\u00fck prob + k\u0131sa s\u00fcre
-    if w in WEAK_FILLERS:
-        if dur <= FILLER_MAX_DUR_WEAK and prob <= FILLER_LOW_PROB:
-            return f"filler:{w}"
-
-    return None
 
 def detect_device(device_arg, compute_arg):
     if device_arg == 'auto':
@@ -263,9 +235,10 @@ def build_srt(words, wpl):
             max_end = subs[j]['start'] + natural_dur + 0.15
             subs[j]['end'] = min(subs[j]['end'], max_end, subs[j + 1]['start'] - 0.12)
     lines = []
-    for idx, sub in enumerate(subs, 1):
-        lines += [str(idx), f"{seconds_to_srt(sub['start'])} --> {seconds_to_srt(sub['end'])}", sub['text'], '']
+    for idx2, sub in enumerate(subs, 1):
+        lines += [str(idx2), f"{seconds_to_srt(sub['start'])} --> {seconds_to_srt(sub['end'])}", sub['text'], '']
     return '\n'.join(lines)
+
 
 _model = None
 _model_path = None
@@ -320,86 +293,26 @@ def run_transcription(audio_path, model_path, language='tr', device='auto',
         filler_prompt = _get_filler_prompt(language)
 
         if filler_pass:
-            # 2-pass filler detection:
-            #   pass1: temperature=0.0 (greedy, stable)
-            #   pass2: temperature=0.2 (sampling, catches different fillers)
-            #   result: union of both passes
-            log(f"Filler pass prompt: {filler_prompt}")
-
-            def _run_fp(temperature_val, pass_num):
-                s2, i2 = model.transcribe(
-                    audio_path,
-                    language=lang_arg,
-                    word_timestamps=True,
-                    beam_size=p['beam_size'],
-                    vad_filter=False,
-                    no_speech_threshold=0.3,
-                    compression_ratio_threshold=2.4,
-                    log_prob_threshold=-1.0,
-                    condition_on_previous_text=True,
-                    temperature=temperature_val,
-                    chunk_length=20,
-                    initial_prompt=filler_prompt or None
-                )
-                cuts = []
-                for seg in s2:
-                    if is_hallucination(seg.text) or not seg.words:
-                        continue
-                    for w in seg.words:
-                        raw_word = w.word or ''
-                        wt = normalize_word(raw_word)
-                        if not wt:
-                            continue
-                        dur = max(0.0, w.end - w.start)
-                        prob = float(getattr(w, 'probability', 1.0) or 1.0)
-                        if dur <= 1.0 and (prob <= 0.90 or len(wt) <= 3):
-                            log(f"  FP{pass_num}: '{raw_word.strip()}' {w.start:.2f}-{w.end:.2f}s p:{prob:.2f} d:{dur:.2f}")
-                        reason = classify_filler(raw_word, dur, prob)
-                        if reason:
-                            cuts.append({'start': round(w.start, 3), 'end': round(w.end, 3),
-                                         'reason': reason, 'dur': round(dur, 3),
-                                         'prob': round(prob, 3), 'word': raw_word.strip()})
-                return cuts, getattr(i2, 'language', language)
-
-            log("Filler pass 1/2 (greedy)...")
-            cuts1, detected = _run_fp(0.0, 1)
-            log(f"  Pass 1: {len(cuts1)} filler")
-
-            log("Filler pass 2/2 (sampling)...")
-            cuts2, _ = _run_fp(0.2, 2)
-            log(f"  Pass 2: {len(cuts2)} filler")
-
-            # Union: keep all from pass1, add from pass2 not already covered (+-0.15s)
-            filler_cuts = list(cuts1)
-            for cb in cuts2:
-                already = any(abs(cb['start'] - ca['start']) <= 0.15 and
-                              abs(cb['end'] - ca['end']) <= 0.15 for ca in cuts1)
-                if not already:
-                    filler_cuts.append(cb)
-            filler_cuts.sort(key=lambda x: x['start'])
-
-            log(f"Filler result: {len(filler_cuts)} (p1:{len(cuts1)} p2:{len(cuts2)} union:{len(filler_cuts)})")
-            for fc in filler_cuts:
-                log(f"  FILLER: '{fc['word']}' {fc['start']:.2f}-{fc['end']:.2f}s {fc['reason']}")
-
+            # --filler-pass: artik kullanilmiyor (legacy compat)
+            # Normal pass ile ayni ciktiyi uret
             out_base = os.path.splitext(audio_path)[0]
             filler_path = out_base + '.fillers.json'
             with open(filler_path, 'w', encoding='utf-8') as f:
-                json.dump(filler_cuts, f, ensure_ascii=False, indent=2)
-
+                json.dump([], f)
             return {
                 'success': True,
                 'filler_path': filler_path,
-                'fillers': filler_cuts,
-                'filler_count': len(filler_cuts),
-                'detected_language': detected,
+                'fillers': [],
+                'filler_count': 0,
+                'detected_language': language,
                 'error': None
             }
+
 
         # \u2500\u2500\u2500 NORMAL PASS: VAD a\u00e7\u0131k, altyaz\u0131 + sessizlik tespiti \u2500\u2500\u2500
         vad = dict(
             threshold=0.45,
-            min_speech_duration_ms=250,
+            min_speech_duration_ms=100,
             max_speech_duration_s=float(p['chunk_len']),
             min_silence_duration_ms=500,
             speech_pad_ms=400
@@ -410,39 +323,22 @@ def run_transcription(audio_path, model_path, language='tr', device='auto',
         filler_prompt = _get_filler_prompt(language)
         log(f"Filler prompt ({language}): {filler_prompt}")
 
-        # Ses dosyasi hakkinda bilgi topla
-        try:
-            import wave
-            with wave.open(audio_path, 'rb') as wf:
-                audio_duration = wf.getnframes() / wf.getframerate()
-        except Exception:
-            audio_duration = 60.0
-
         if dev == 'cuda':
-            # Batched mod: sadece uzun ve az klipli sesler icin
-            # Kisa/yogun klipli ses (kesilmis timeline) Batched'i bozuyor
-            avg_clip_dur = audio_duration / max(1, p['num_workers'])
-            use_batched = audio_duration > 60.0 and avg_clip_dur > 2.0
-            if use_batched:
-                try:
-                    from faster_whisper import BatchedInferencePipeline
-                    pipe = BatchedInferencePipeline(model=model)
-                    segs, info = pipe.transcribe(
-                        audio_path,
-                        language=lang_arg,
-                        word_timestamps=True,
-                        batch_size=min(p['batch_size'], 8),
-                        vad_filter=True,
-                        vad_parameters=vad,
-                        initial_prompt=filler_prompt or None
-                    )
-                    log(f"Batched mod (dur:{audio_duration:.0f}s)")
-                except Exception as e:
-                    log(f"Batched fail, normal moda geciyor: {e}")
-                    use_batched = False
-
-            if not use_batched:
-                log(f"Normal mod (dur:{audio_duration:.0f}s)")
+            try:
+                from faster_whisper import BatchedInferencePipeline
+                pipe = BatchedInferencePipeline(model=model)
+                segs, info = pipe.transcribe(
+                    audio_path,
+                    language=lang_arg,
+                    word_timestamps=True,
+                    batch_size=min(p['batch_size'], 8),
+                    vad_filter=True,
+                    vad_parameters=vad,
+                    initial_prompt=filler_prompt or None
+                )
+                log("Batched mod")
+            except Exception as e:
+                log(f"Batched fail: {e}")
                 segs, info = model.transcribe(
                     audio_path,
                     language=lang_arg,
@@ -450,7 +346,7 @@ def run_transcription(audio_path, model_path, language='tr', device='auto',
                     beam_size=p['beam_size'],
                     vad_filter=True,
                     vad_parameters=vad,
-                    no_speech_threshold=0.4,
+                    no_speech_threshold=0.6,
                     compression_ratio_threshold=2.4,
                     log_prob_threshold=-1.0,
                     condition_on_previous_text=True,
@@ -466,7 +362,7 @@ def run_transcription(audio_path, model_path, language='tr', device='auto',
                 beam_size=p['beam_size'],
                 vad_filter=True,
                 vad_parameters=vad,
-                no_speech_threshold=0.4,
+                no_speech_threshold=0.6,
                 compression_ratio_threshold=2.4,
                 log_prob_threshold=-1.0,
                 condition_on_previous_text=True,
@@ -516,7 +412,12 @@ def run_transcription(audio_path, model_path, language='tr', device='auto',
                         'dur': round(gap, 3)
                     })
 
-                filler_reason = classify_filler(raw_word, dur, prob)
+                try:
+                    _widx = list(seg.words).index(w)
+                    _nw = seg.words[_widx + 1].word if _widx + 1 < len(seg.words) else None
+                except Exception:
+                    _nw = None
+                filler_reason = classify_filler(raw_word, dur, prob, next_word=_nw)
                 if filler_reason:
                     cuts.append({
                         'start': round(w.start, 3),
