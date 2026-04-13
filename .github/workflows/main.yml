@@ -127,7 +127,7 @@ jobs:
 
   engine-mac-intel:
     name: Engine · macOS Intel
-    runs-on: macos-13
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -310,7 +310,7 @@ jobs:
 
   filler-mac-intel:
     name: Filler · macOS Intel
-    runs-on: macos-13
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
