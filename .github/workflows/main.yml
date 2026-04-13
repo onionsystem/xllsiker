@@ -1,439 +1,164 @@
-name: ZSub Build
+name: Build ZSub Filler Engine MMS_FA
 
 on:
-  push:
-    branches: [ main, master ]
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'zsub_filler.py'
+      - '.github/workflows/build_filler_detect.yml'
+
+env:
+  TOOL_VERSION: "3.0.0"
 
 jobs:
-
-  # ══════════════════════════════════════════════════════════════
-  # ZSUB ENGINE — faster-whisper (altyazi motoru)
-  # ══════════════════════════════════════════════════════════════
-
-  engine-win-cuda:
-    name: Engine · Windows CUDA
+  build-win:
+    name: Windows x64
     runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
-      - name: Install
+      - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
-          pip install ctranslate2 faster-whisper
-          pip install pyinstaller>=6.0
+          python -m pip install --upgrade pip wheel
+          python -m pip install "setuptools<82"
+          python -m pip install torch==2.8.0 torchaudio==2.8.0 uroman==1.3.1.1
+          python -m pip install pyinstaller==6.11.1
+        shell: pwsh
 
-      - name: Gereksiz torch dosyalarini sil
+      - name: Warm MMS_FA cache
         run: |
-          python -c "
-          import os, shutil, glob, sys
-          site = next(p for p in sys.path if 'site-packages' in p)
-          torch_dir = os.path.join(site, 'torch')
-          targets = [
-              os.path.join(torch_dir, 'test'),
-              os.path.join(torch_dir, 'share', 'cmake'),
-              os.path.join(torch_dir, 'include'),
-          ]
-          for lib in glob.glob(os.path.join(torch_dir, 'lib', '*xpu*')): targets.append(lib)
-          for lib in glob.glob(os.path.join(torch_dir, 'lib', '*rocm*')): targets.append(lib)
-          for lib in glob.glob(os.path.join(torch_dir, 'lib', '*hip*')): targets.append(lib)
-          total = 0
-          for p in targets:
-              if os.path.exists(p):
-                  size = sum(os.path.getsize(f) for f in glob.glob(p+'/**', recursive=True) if os.path.isfile(f))
-                  total += size
-                  shutil.rmtree(p, ignore_errors=True) if os.path.isdir(p) else os.remove(p)
-          print(f'Silindi: {total/1024/1024:.0f} MB')
-          "
+          New-Item -ItemType Directory -Force -Path .torch-cache\hub\checkpoints | Out-Null
+          python -c "import os, torch; torch.hub.set_dir(os.path.abspath('.torch-cache')); from torchaudio.pipelines import MMS_FA as b; b.get_model(with_star=False, dl_kwargs={'model_dir': os.path.abspath('.torch-cache/hub/checkpoints')}); print('MMS_FA cached')"
+        shell: pwsh
+
+      - name: Verify imports
+        run: |
+          python -c "import torch, torchaudio, uroman; print('torch:', torch.__version__); print('torchaudio:', torchaudio.__version__); print('uroman ok')"
+        shell: pwsh
 
       - name: Build
         run: |
-          pyinstaller faster_whisper_cli.py `
-            --onedir `
-            --name zsub-engine `
-            --collect-all faster_whisper `
-            --collect-all ctranslate2 `
-            --collect-all tokenizers `
+          pyinstaller --clean --noconfirm --onedir --name zsub-filler `
+            --collect-all uroman `
+            --collect-submodules torchaudio `
             --collect-submodules torch `
-            --hidden-import=torch `
-            --hidden-import=torch.cuda `
-            --exclude-module=torch.distributed `
-            --exclude-module=torch.fx `
-            --exclude-module=torch.onnx `
-            --exclude-module=torch.ao `
-            --exclude-module=torch.testing `
-            --exclude-module=torchvision `
-            --exclude-module=torchaudio `
-            --noconfirm `
-            --distpath dist\win\cuda
+            --hidden-import regex `
+            --add-data ".torch-cache;.torch-cache" `
+            zsub_filler.py
+        shell: pwsh
 
-      - name: Upload
-        uses: actions/upload-artifact@v4
-        with:
-          name: zsub-engine-win-cuda
-          path: dist\win\cuda\zsub-engine\
-          retention-days: 7
-
-  # ──────────────────────────────────────────────────────────────
-
-  engine-win-cpu:
-    name: Engine · Windows CPU
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install
+      - name: Smoke test
         run: |
-          python -m pip install --upgrade pip
-          pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu
-          pip install ctranslate2 faster-whisper
-          pip install pyinstaller>=6.0
+          if (!(Test-Path "dist\zsub-filler\zsub-filler.exe")) { throw "binary yok" }
+          & "dist\zsub-filler\zsub-filler.exe" --help | Out-Null
+        shell: pwsh
 
-      - name: Build
-        run: |
-          pyinstaller faster_whisper_cli.py `
-            --onedir `
-            --name zsub-engine-cpu `
-            --collect-all faster_whisper `
-            --collect-all ctranslate2 `
-            --collect-all tokenizers `
-            --hidden-import=torch `
-            --exclude-module=torch.cuda `
-            --exclude-module=torch.distributed `
-            --exclude-module=torch.fx `
-            --exclude-module=torch.onnx `
-            --exclude-module=torchvision `
-            --exclude-module=torchaudio `
-            --noconfirm `
-            --distpath dist\win\cpu
-
-      - name: Upload
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
-          name: zsub-engine-win-cpu
-          path: dist\win\cpu\zsub-engine-cpu\
-          retention-days: 7
+          name: zsub-filler-v${{ env.TOOL_VERSION }}-win-x64
+          path: dist/zsub-filler/
+          retention-days: 30
 
-  # ──────────────────────────────────────────────────────────────
-
-  engine-mac-arm64:
-    name: Engine · macOS ARM64
+  build-mac-arm64:
+    name: macOS arm64
     runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
-      - name: Install
+      - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu
-          pip install ctranslate2 faster-whisper
-          pip install pyinstaller>=6.0
+          python -m pip install --upgrade pip wheel
+          python -m pip install "setuptools<82"
+          python -m pip install torch==2.8.0 torchaudio==2.8.0 uroman==1.3.1.1
+          python -m pip install pyinstaller==6.11.1
+
+      - name: Warm MMS_FA cache
+        run: |
+          mkdir -p .torch-cache/hub/checkpoints
+          python -c "import os, torch; torch.hub.set_dir(os.path.abspath('.torch-cache')); from torchaudio.pipelines import MMS_FA as b; b.get_model(with_star=False, dl_kwargs={'model_dir': os.path.abspath('.torch-cache/hub/checkpoints')}); print('MMS_FA cached')"
+
+      - name: Verify imports
+        run: |
+          python -c "import torch, torchaudio, uroman, platform; print('torch:', torch.__version__); print('torchaudio:', torchaudio.__version__); print('machine:', platform.machine())"
 
       - name: Build
         run: |
-          pyinstaller faster_whisper_cli.py \
-            --onedir \
-            --name zsub-engine-mac-arm64 \
-            --collect-all faster_whisper \
-            --collect-all ctranslate2 \
-            --collect-all tokenizers \
-            --hidden-import=torch \
-            --exclude-module=torch.cuda \
-            --exclude-module=torch.distributed \
-            --exclude-module=torch.fx \
-            --exclude-module=torch.onnx \
-            --noconfirm \
-            --distpath dist/mac/arm64
-
-      - name: Upload
-        uses: actions/upload-artifact@v4
-        with:
-          name: zsub-engine-mac-arm64
-          path: dist/mac/arm64/zsub-engine-mac-arm64/
-          retention-days: 7
-
-  # ──────────────────────────────────────────────────────────────
-
-  engine-mac-intel:
-    name: Engine · macOS Intel
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install
-        run: |
-          python -m pip install --upgrade pip
-          pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu
-          pip install ctranslate2 faster-whisper
-          pip install pyinstaller>=6.0
-
-      - name: Build
-        run: |
-          pyinstaller faster_whisper_cli.py \
-            --onedir \
-            --name zsub-engine-mac-intel \
-            --collect-all faster_whisper \
-            --collect-all ctranslate2 \
-            --collect-all tokenizers \
-            --hidden-import=torch \
-            --exclude-module=torch.cuda \
-            --exclude-module=torch.distributed \
-            --exclude-module=torch.fx \
-            --exclude-module=torch.onnx \
-            --noconfirm \
-            --distpath dist/mac/intel
-
-      - name: Upload
-        uses: actions/upload-artifact@v4
-        with:
-          name: zsub-engine-mac-intel
-          path: dist/mac/intel/zsub-engine-mac-intel/
-          retention-days: 7
-
-  # ══════════════════════════════════════════════════════════════
-  # ZSUB FILLER — MMS forced alignment (dolgu sesi motoru)
-  # ══════════════════════════════════════════════════════════════
-
-  filler-win-cuda:
-    name: Filler · Windows CUDA
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install
-        run: |
-          python -m pip install --upgrade pip
-          pip install torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
-          pip install transformers>=4.40.0 safetensors
-          pip install pyinstaller>=6.0
-
-      - name: Gereksiz torch dosyalarini sil
-        run: |
-          python -c "
-          import os, shutil, glob, sys
-          site = next(p for p in sys.path if 'site-packages' in p)
-          torch_dir = os.path.join(site, 'torch')
-          targets = [
-              os.path.join(torch_dir, 'test'),
-              os.path.join(torch_dir, 'share', 'cmake'),
-              os.path.join(torch_dir, 'include'),
-          ]
-          for lib in glob.glob(os.path.join(torch_dir, 'lib', '*xpu*')): targets.append(lib)
-          for lib in glob.glob(os.path.join(torch_dir, 'lib', '*rocm*')): targets.append(lib)
-          for lib in glob.glob(os.path.join(torch_dir, 'lib', '*hip*')): targets.append(lib)
-          total = 0
-          for p in targets:
-              if os.path.exists(p):
-                  size = sum(os.path.getsize(f) for f in glob.glob(p+'/**', recursive=True) if os.path.isfile(f))
-                  total += size
-                  shutil.rmtree(p, ignore_errors=True) if os.path.isdir(p) else os.remove(p)
-          print(f'Silindi: {total/1024/1024:.0f} MB')
-          "
-
-      - name: Build
-        run: |
-          pyinstaller zsub_filler.py `
-            --onedir `
-            --name zsub-filler `
-            --collect-submodules torch `
-            --collect-all torchaudio `
-            --collect-all transformers `
-            --collect-all tokenizers `
-            --collect-all safetensors `
-            --hidden-import=torch `
-            --hidden-import=torch.cuda `
-            --hidden-import=torchaudio.functional `
-            --hidden-import=torchaudio.transforms `
-            --hidden-import=transformers.models.wav2vec2 `
-            --hidden-import=transformers.models.wav2vec2.modeling_wav2vec2 `
-            --hidden-import=transformers.models.wav2vec2.processing_wav2vec2 `
-            --hidden-import=transformers.models.wav2vec2.feature_extraction_wav2vec2 `
-            --hidden-import=transformers.models.wav2vec2.tokenization_wav2vec2 `
-            --exclude-module=torch.distributed `
-            --exclude-module=torch.fx `
-            --exclude-module=torch.onnx `
-            --exclude-module=torch.ao `
-            --exclude-module=torch.testing `
-            --exclude-module=torchvision `
-            --noconfirm `
-            --distpath dist\win\cuda
-
-      - name: Upload
-        uses: actions/upload-artifact@v4
-        with:
-          name: zsub-filler-win-cuda
-          path: dist\win\cuda\zsub-filler\
-          retention-days: 7
-
-  # ──────────────────────────────────────────────────────────────
-
-  filler-win-cpu:
-    name: Filler · Windows CPU
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install
-        run: |
-          python -m pip install --upgrade pip
-          pip install torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cpu
-          pip install transformers>=4.40.0 safetensors
-          pip install pyinstaller>=6.0
-
-      - name: Build
-        run: |
-          pyinstaller zsub_filler.py `
-            --onedir `
-            --name zsub-filler-cpu `
-            --collect-submodules torch `
-            --collect-all torchaudio `
-            --collect-all transformers `
-            --collect-all tokenizers `
-            --collect-all safetensors `
-            --hidden-import=torch `
-            --hidden-import=torchaudio.functional `
-            --hidden-import=torchaudio.transforms `
-            --hidden-import=transformers.models.wav2vec2 `
-            --hidden-import=transformers.models.wav2vec2.modeling_wav2vec2 `
-            --hidden-import=transformers.models.wav2vec2.processing_wav2vec2 `
-            --hidden-import=transformers.models.wav2vec2.feature_extraction_wav2vec2 `
-            --hidden-import=transformers.models.wav2vec2.tokenization_wav2vec2 `
-            --exclude-module=torch.cuda `
-            --exclude-module=torch.distributed `
-            --exclude-module=torch.fx `
-            --exclude-module=torch.onnx `
-            --exclude-module=torchvision `
-            --noconfirm `
-            --distpath dist\win\cpu
-
-      - name: Upload
-        uses: actions/upload-artifact@v4
-        with:
-          name: zsub-filler-win-cpu
-          path: dist\win\cpu\zsub-filler-cpu\
-          retention-days: 7
-
-  # ──────────────────────────────────────────────────────────────
-
-  filler-mac-arm64:
-    name: Filler · macOS ARM64
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install
-        run: |
-          python -m pip install --upgrade pip
-          pip install torch==2.8.0 torchaudio==2.8.0
-          pip install transformers>=4.40.0 safetensors
-          pip install pyinstaller>=6.0
-
-      - name: Build
-        run: |
-          pyinstaller zsub_filler.py \
-            --onedir \
-            --name zsub-filler-mac-arm64 \
+          pyinstaller --clean --noconfirm --onedir --name zsub-filler-mac-arm64 \
+            --collect-all uroman \
+            --collect-submodules torchaudio \
             --collect-submodules torch \
-            --collect-all torchaudio \
-            --collect-all transformers \
-            --collect-all tokenizers \
-            --collect-all safetensors \
-            --hidden-import=torch \
-            --hidden-import=torchaudio.functional \
-            --hidden-import=torchaudio.transforms \
-            --hidden-import=transformers.models.wav2vec2 \
-            --hidden-import=transformers.models.wav2vec2.modeling_wav2vec2 \
-            --hidden-import=transformers.models.wav2vec2.processing_wav2vec2 \
-            --hidden-import=transformers.models.wav2vec2.feature_extraction_wav2vec2 \
-            --hidden-import=transformers.models.wav2vec2.tokenization_wav2vec2 \
-            --exclude-module=torch.distributed \
-            --exclude-module=torch.fx \
-            --exclude-module=torch.onnx \
-            --noconfirm \
-            --distpath dist/mac/arm64
+            --hidden-import regex \
+            --add-data ".torch-cache:.torch-cache" \
+            zsub_filler.py
 
-      - name: Upload
-        uses: actions/upload-artifact@v4
+      - name: Smoke test
+        run: |
+          test -f "dist/zsub-filler-mac-arm64/zsub-filler-mac-arm64"
+          chmod +x "dist/zsub-filler-mac-arm64/zsub-filler-mac-arm64"
+          "dist/zsub-filler-mac-arm64/zsub-filler-mac-arm64" --help >/dev/null
+
+      - uses: actions/upload-artifact@v5
         with:
-          name: zsub-filler-mac-arm64
-          path: dist/mac/arm64/zsub-filler-mac-arm64/
-          retention-days: 7
+          name: zsub-filler-v${{ env.TOOL_VERSION }}-mac-arm64
+          path: dist/zsub-filler-mac-arm64/
+          retention-days: 30
 
-  # ──────────────────────────────────────────────────────────────
+  build-mac-intel:
+    name: macOS Intel x64
+    runs-on: macos-15-intel
 
-  filler-mac-intel:
-    name: Filler · macOS Intel
-    runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
-      - name: Install
+      - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install torch==2.8.0 torchaudio==2.8.0
-          pip install transformers>=4.40.0 safetensors
-          pip install pyinstaller>=6.0
+          python -m pip install --upgrade pip wheel
+          python -m pip install "setuptools<82"
+          python -m pip install torch==2.2.2 torchaudio==2.2.2 uroman==1.3.1.1
+          python -m pip install pyinstaller==6.11.1
+
+      - name: Warm MMS_FA cache
+        run: |
+          mkdir -p .torch-cache/hub/checkpoints
+          python -c "import os, torch; torch.hub.set_dir(os.path.abspath('.torch-cache')); from torchaudio.pipelines import MMS_FA as b; b.get_model(with_star=False, dl_kwargs={'model_dir': os.path.abspath('.torch-cache/hub/checkpoints')}); print('MMS_FA cached')"
+
+      - name: Verify imports
+        run: |
+          python -c "import torch, torchaudio, uroman, platform; print('torch:', torch.__version__); print('torchaudio:', torchaudio.__version__); print('machine:', platform.machine())"
 
       - name: Build
         run: |
-          pyinstaller zsub_filler.py \
-            --onedir \
-            --name zsub-filler-mac-intel \
+          pyinstaller --clean --noconfirm --onedir --name zsub-filler-mac-intel \
+            --collect-all uroman \
+            --collect-submodules torchaudio \
             --collect-submodules torch \
-            --collect-all torchaudio \
-            --collect-all transformers \
-            --collect-all tokenizers \
-            --collect-all safetensors \
-            --hidden-import=torch \
-            --hidden-import=torchaudio.functional \
-            --hidden-import=torchaudio.transforms \
-            --hidden-import=transformers.models.wav2vec2 \
-            --hidden-import=transformers.models.wav2vec2.modeling_wav2vec2 \
-            --hidden-import=transformers.models.wav2vec2.processing_wav2vec2 \
-            --hidden-import=transformers.models.wav2vec2.feature_extraction_wav2vec2 \
-            --hidden-import=transformers.models.wav2vec2.tokenization_wav2vec2 \
-            --exclude-module=torch.distributed \
-            --exclude-module=torch.fx \
-            --exclude-module=torch.onnx \
-            --noconfirm \
-            --distpath dist/mac/intel
+            --hidden-import regex \
+            --add-data ".torch-cache:.torch-cache" \
+            zsub_filler.py
 
-      - name: Upload
-        uses: actions/upload-artifact@v4
+      - name: Smoke test
+        run: |
+          test -f "dist/zsub-filler-mac-intel/zsub-filler-mac-intel"
+          chmod +x "dist/zsub-filler-mac-intel/zsub-filler-mac-intel"
+          "dist/zsub-filler-mac-intel/zsub-filler-mac-intel" --help >/dev/null
+
+      - uses: actions/upload-artifact@v5
         with:
-          name: zsub-filler-mac-intel
-          path: dist/mac/intel/zsub-filler-mac-intel/
-          retention-days: 7
+          name: zsub-filler-v${{ env.TOOL_VERSION }}-mac-intel-x64
+          path: dist/zsub-filler-mac-intel/
+          retention-days: 30
