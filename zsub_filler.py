@@ -7,10 +7,14 @@ import io
 import re
 import json
 import math
+import wave
+import struct
 import argparse
+import tempfile
+import subprocess
 import unicodedata
 
-VERSION = "3.0.0"
+VERSION = "3.1.0"
 
 def log(msg):
     try:
@@ -41,6 +45,66 @@ def resolve_torch_cache_dir(user_cache_dir=None):
             return c
 
     return os.path.abspath(user_cache_dir) if user_cache_dir else os.path.join(base, ".torch-cache")
+
+def find_ffmpeg():
+    base = runtime_base_dir()
+    candidates = [
+        os.path.join(base, "ffmpeg.exe"),
+        os.path.join(base, "..", "ffmpeg.exe"),
+        os.path.join(base, "..", "..", "ffmpeg.exe"),
+        os.path.join(base, "..", "..", "..", "ffmpeg.exe"),
+        os.path.join(base, "ffmpeg"),
+        os.path.join(base, "..", "ffmpeg"),
+        os.path.join(base, "..", "..", "ffmpeg"),
+        os.path.join(base, "..", "..", "..", "ffmpeg"),
+    ]
+    for c in candidates:
+        c = os.path.abspath(c)
+        if os.path.exists(c):
+            return c
+    return "ffmpeg"
+
+def convert_audio_to_alignment_wav(src_path):
+    ffmpeg = find_ffmpeg()
+    fd, out_path = tempfile.mkstemp(prefix="zfill_", suffix=".wav")
+    os.close(fd)
+
+    cmd = [
+        ffmpeg, "-y",
+        "-i", src_path,
+        "-ac", "1",
+        "-ar", "16000",
+        "-c:a", "pcm_s16le",
+        out_path,
+    ]
+    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if p.returncode != 0:
+        raise RuntimeError("ffmpeg convert hatasi: " + p.stderr.decode("utf-8", errors="ignore")[-1200:])
+    return out_path
+
+def load_wav_as_tensor(wav_path):
+    import torch
+
+    with wave.open(wav_path, "rb") as wf:
+        ch = wf.getnchannels()
+        sw = wf.getsampwidth()
+        sr = wf.getframerate()
+        n = wf.getnframes()
+        raw = wf.readframes(n)
+
+    if sw != 2:
+        raise RuntimeError(f"Beklenmeyen sample width: {sw}")
+
+    samples = struct.unpack("<%dh" % (n * ch), raw)
+    if ch > 1:
+        mono = []
+        for i in range(0, len(samples), ch):
+            mono.append(sum(samples[i:i + ch]) / float(ch))
+        samples = mono
+
+    data = [float(x) / 32768.0 for x in samples]
+    waveform = torch.tensor(data, dtype=torch.float32).unsqueeze(0)
+    return waveform, sr
 
 def parse_srt_timestamp(ts):
     ts = ts.replace(",", ".")
@@ -84,10 +148,6 @@ def parse_srt(srt_path):
 
 def build_full_transcript(entries):
     return " ".join(x[2] for x in entries).strip()
-
-def get_whisper_lang_from_entries(entries):
-    # SRT'te dil yok; main.js isterse CLI'dan verir.
-    return None
 
 def basic_ascii_fallback(text):
     text = text.lower().replace("’", "'")
@@ -163,7 +223,6 @@ def detect_fillers(audio_path, srt_path, out_path, cache_dir=None,
                    min_gap=0.12, max_gap=1.00, energy_margin=0.006,
                    zcr_min=0.01, zcr_max=0.22, debug=False, lang_code=None):
     import torch
-    import torchaudio
     from torchaudio.pipelines import MMS_FA
 
     if not os.path.exists(audio_path):
@@ -201,12 +260,17 @@ def detect_fillers(audio_path, srt_path, out_path, cache_dir=None,
     aligner = bundle.get_aligner()
     sample_rate = bundle.sample_rate
 
-    waveform, sr = torchaudio.load(audio_path)
-    if waveform.size(0) > 1:
-        waveform = waveform.mean(dim=0, keepdim=True)
+    tmp_wav = convert_audio_to_alignment_wav(audio_path)
+    try:
+        waveform, sr = load_wav_as_tensor(tmp_wav)
+    finally:
+        try:
+            os.remove(tmp_wav)
+        except Exception:
+            pass
+
     if sr != sample_rate:
-        waveform = torchaudio.functional.resample(waveform, sr, sample_rate)
-        sr = sample_rate
+        raise RuntimeError(f"Beklenmeyen sample rate: {sr}")
 
     with torch.inference_mode():
         emission, _ = model(waveform.to(device))
@@ -223,7 +287,7 @@ def detect_fillers(audio_path, srt_path, out_path, cache_dir=None,
     duration_sec = waveform.size(1) / float(sr)
     frame_sec = duration_sec / max(1, total_frames)
 
-    y = waveform[0].cpu().numpy().tolist()
+    y = waveform[0].cpu().tolist()
     rms_vals, zcr_vals, hop_size = compute_rms_and_zcr(y, sr, frame_ms=20, hop_ms=10)
 
     noise_floor = 0.003
@@ -240,15 +304,15 @@ def detect_fillers(audio_path, srt_path, out_path, cache_dir=None,
     cuts = []
 
     prev_end = 0.0
-    for idx, span in enumerate(token_spans):
+    for span in token_spans:
         cur_start = span_start_sec(span)
         gap_start = prev_end
         gap_end = cur_start
         gap_dur = gap_end - gap_start
 
         if min_gap <= gap_dur <= max_gap:
-            avg_rms, std_rms = get_window_stats(rms_vals, gap_start, gap_end, hop_size, sr)
-            avg_zcr, std_zcr = get_window_stats(zcr_vals, gap_start, gap_end, hop_size, sr)
+            avg_rms, _ = get_window_stats(rms_vals, gap_start, gap_end, hop_size, sr)
+            avg_zcr, _ = get_window_stats(zcr_vals, gap_start, gap_end, hop_size, sr)
 
             is_voicedish = zcr_min <= avg_zcr <= zcr_max
             is_energetic = avg_rms > (noise_floor + energy_margin)
@@ -274,8 +338,8 @@ def detect_fillers(audio_path, srt_path, out_path, cache_dir=None,
 
     tail_gap = duration_sec - prev_end
     if min_gap <= tail_gap <= max_gap:
-        avg_rms, std_rms = get_window_stats(rms_vals, prev_end, duration_sec, hop_size, sr)
-        avg_zcr, std_zcr = get_window_stats(zcr_vals, prev_end, duration_sec, hop_size, sr)
+        avg_rms, _ = get_window_stats(rms_vals, prev_end, duration_sec, hop_size, sr)
+        avg_zcr, _ = get_window_stats(zcr_vals, prev_end, duration_sec, hop_size, sr)
         is_voicedish = zcr_min <= avg_zcr <= zcr_max
         is_energetic = avg_rms > (noise_floor + energy_margin)
         if is_energetic:
@@ -302,7 +366,7 @@ def main():
     if hasattr(sys.stderr, "buffer"):
         sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
-    pa = argparse.ArgumentParser(description="ZSub Filler Engine v3.0 - MMS_FA Multilingual")
+    pa = argparse.ArgumentParser(description="ZSub Filler Engine v3.1 - MMS_FA Multilingual")
     pa.add_argument("--audio", required=True)
     pa.add_argument("--srt", required=True)
     pa.add_argument("--out", required=True)
