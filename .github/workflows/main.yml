@@ -1,291 +1,355 @@
-name: Build ZSub Engines
+name: ZSub Build
 
 on:
-  workflow_dispatch:
   push:
-    branches: [main]
-    paths:
-      - 'faster_whisper_cli.py'
-      - '.github/workflows/main.yml'
-
-env:
-  ZSUB_VERSION: "2.2.0"
+    branches: [ main, master ]
+  workflow_dispatch:
 
 jobs:
-  # ═══════════════════════════════════════════
-  # WINDOWS — CUDA (RTX 50xx dahil sm_120)
-  # ═══════════════════════════════════════════
-  build-win-cuda:
-    name: Windows CUDA
+
+  # ══════════════════════════════════════════════════════════════
+  # ZSUB ENGINE — faster-whisper (altyazi motoru)
+  # ══════════════════════════════════════════════════════════════
+
+  engine-win-cuda:
+    name: Engine · Windows CUDA
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
+      - name: Install
         run: |
-          python -m pip install --upgrade pip wheel
-          python -m pip install "setuptools<82"
-          python -m pip install numpy==1.26.4
-          python -m pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cu128
-          python -m pip install ctranslate2==4.7.1 faster-whisper==1.2.1 av==17.0.0 requests==2.32.3
-          python -m pip install pyinstaller==6.11.1
-        shell: pwsh
-
-      - name: Verify imports
-        run: |
-          python -c "
-          import torch, ctranslate2, faster_whisper, av, numpy
-          print('torch:', torch.__version__)
-          print('cuda:', torch.cuda.is_available())
-          print('ctranslate2:', ctranslate2.__version__)
-          print('faster_whisper:', faster_whisper.__version__)
-          "
-        shell: pwsh
+          python -m pip install --upgrade pip
+          pip install torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
+          pip install ctranslate2 faster-whisper
+          pip install pyinstaller>=6.0
 
       - name: Build
         run: |
-          $ct2 = python -c "import ctranslate2, os; print(os.path.dirname(ctranslate2.__file__))"
-          $fw  = python -c "import faster_whisper, os; print(os.path.dirname(faster_whisper.__file__))"
-          $av  = python -c "import av, os; print(os.path.dirname(av.__file__))"
-          $np  = python -c "import numpy, os; print(os.path.dirname(numpy.__file__))"
+          pyinstaller faster_whisper_cli.py `
+            --onedir `
+            --name zsub-engine `
+            --collect-all faster_whisper `
+            --collect-all ctranslate2 `
+            --collect-all tokenizers `
+            --collect-all torch `
+            --hidden-import=torch `
+            --hidden-import=torch.cuda `
+            --noconfirm `
+            --distpath dist\win\cuda
 
-          pyinstaller --clean --noconfirm --onedir --name zsub-engine `
-            --add-data "$ct2;ctranslate2" `
-            --add-data "$fw;faster_whisper" `
-            --add-data "$av;av" `
-            --add-data "$np;numpy" `
-            --collect-binaries ctranslate2 `
-            --collect-binaries av `
-            --hidden-import ctranslate2 `
-            --hidden-import faster_whisper `
-            --hidden-import faster_whisper.transcribe `
-            --hidden-import faster_whisper.audio `
-            --hidden-import faster_whisper.utils `
-            --hidden-import faster_whisper.tokenizer `
-            --hidden-import av `
-            --hidden-import torch `
-            faster_whisper_cli.py
-        shell: pwsh
-
-      - name: Smoke test
-        run: |
-          if (!(Test-Path "dist\zsub-engine\zsub-engine.exe")) { throw "binary yok" }
-          & "dist\zsub-engine\zsub-engine.exe" --help | Out-Null
-        shell: pwsh
-
-      - uses: actions/upload-artifact@v5
+      - name: Upload
+        uses: actions/upload-artifact@v4
         with:
-          name: zsub-engine-v${{ env.ZSUB_VERSION }}-win-cuda
-          path: dist/zsub-engine/
-          retention-days: 30
+          name: zsub-engine-win-cuda
+          path: dist\win\cuda\zsub-engine\
+          retention-days: 7
 
-  # ═══════════════════════════════════════════
-  # WINDOWS — CPU
-  # ═══════════════════════════════════════════
-  build-win-cpu:
-    name: Windows CPU
+  # ──────────────────────────────────────────────────────────────
+
+  engine-win-cpu:
+    name: Engine · Windows CPU
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
+      - name: Install
         run: |
-          python -m pip install --upgrade pip wheel
-          python -m pip install "setuptools<82"
-          python -m pip install numpy==1.26.4
-          python -m pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu
-          python -m pip install ctranslate2==4.7.1 faster-whisper==1.2.1 av==17.0.0 requests==2.32.3
-          python -m pip install pyinstaller==6.11.1
-        shell: pwsh
-
-      - name: Verify imports
-        run: |
-          python -c "
-          import torch, ctranslate2, faster_whisper, av, numpy
-          print('torch:', torch.__version__)
-          print('ctranslate2:', ctranslate2.__version__)
-          print('faster_whisper:', faster_whisper.__version__)
-          "
-        shell: pwsh
+          python -m pip install --upgrade pip
+          pip install torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cpu
+          pip install ctranslate2 faster-whisper
+          pip install pyinstaller>=6.0
 
       - name: Build
         run: |
-          $ct2 = python -c "import ctranslate2, os; print(os.path.dirname(ctranslate2.__file__))"
-          $fw  = python -c "import faster_whisper, os; print(os.path.dirname(faster_whisper.__file__))"
-          $av  = python -c "import av, os; print(os.path.dirname(av.__file__))"
-          $np  = python -c "import numpy, os; print(os.path.dirname(numpy.__file__))"
+          pyinstaller faster_whisper_cli.py `
+            --onedir `
+            --name zsub-engine-cpu `
+            --collect-all faster_whisper `
+            --collect-all ctranslate2 `
+            --collect-all tokenizers `
+            --noconfirm `
+            --distpath dist\win\cpu
 
-          pyinstaller --clean --noconfirm --onedir --name zsub-engine-cpu `
-            --add-data "$ct2;ctranslate2" `
-            --add-data "$fw;faster_whisper" `
-            --add-data "$av;av" `
-            --add-data "$np;numpy" `
-            --collect-binaries ctranslate2 `
-            --collect-binaries av `
-            --hidden-import ctranslate2 `
-            --hidden-import faster_whisper `
-            --hidden-import faster_whisper.transcribe `
-            --hidden-import faster_whisper.audio `
-            --hidden-import faster_whisper.utils `
-            --hidden-import faster_whisper.tokenizer `
-            --hidden-import av `
-            --hidden-import torch `
-            faster_whisper_cli.py
-        shell: pwsh
-
-      - name: Smoke test
-        run: |
-          if (!(Test-Path "dist\zsub-engine-cpu\zsub-engine-cpu.exe")) { throw "binary yok" }
-          & "dist\zsub-engine-cpu\zsub-engine-cpu.exe" --help | Out-Null
-        shell: pwsh
-
-      - uses: actions/upload-artifact@v5
+      - name: Upload
+        uses: actions/upload-artifact@v4
         with:
-          name: zsub-engine-v${{ env.ZSUB_VERSION }}-win-cpu
-          path: dist/zsub-engine-cpu/
-          retention-days: 30
+          name: zsub-engine-win-cpu
+          path: dist\win\cpu\zsub-engine-cpu\
+          retention-days: 7
 
-  # ═══════════════════════════════════════════
-  # macOS — Apple Silicon (arm64)
-  # ═══════════════════════════════════════════
-  build-mac-arm64:
-    name: macOS arm64
+  # ──────────────────────────────────────────────────────────────
+
+  engine-mac-arm64:
+    name: Engine · macOS ARM64
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
+      - name: Install
         run: |
-          python -m pip install --upgrade pip wheel
-          python -m pip install "setuptools<82"
-          python -m pip install numpy==1.26.4
-          python -m pip install torch==2.8.0
-          python -m pip install ctranslate2==4.7.1 faster-whisper==1.2.1 av==17.0.0 requests==2.32.3
-          python -m pip install pyinstaller==6.11.1
-
-      - name: Verify imports
-        run: |
-          python -c "
-          import torch, ctranslate2, faster_whisper, av, numpy, platform
-          print('torch:', torch.__version__)
-          print('ctranslate2:', ctranslate2.__version__)
-          print('faster_whisper:', faster_whisper.__version__)
-          print('platform:', platform.machine())
-          print('mps:', getattr(torch.backends, 'mps', None) and torch.backends.mps.is_available())
-          "
+          python -m pip install --upgrade pip
+          pip install torch==2.8.0 torchaudio==2.8.0
+          pip install ctranslate2 faster-whisper
+          pip install pyinstaller>=6.0
 
       - name: Build
         run: |
-          ct2=$(python -c "import ctranslate2, os; print(os.path.dirname(ctranslate2.__file__))")
-          fw=$(python -c "import faster_whisper, os; print(os.path.dirname(faster_whisper.__file__))")
-          av_p=$(python -c "import av, os; print(os.path.dirname(av.__file__))")
-          np_p=$(python -c "import numpy, os; print(os.path.dirname(numpy.__file__))")
+          pyinstaller faster_whisper_cli.py \
+            --onedir \
+            --name zsub-engine-mac-arm64 \
+            --collect-all faster_whisper \
+            --collect-all ctranslate2 \
+            --collect-all tokenizers \
+            --noconfirm \
+            --distpath dist/mac/arm64
 
-          pyinstaller --clean --noconfirm --onedir --name zsub-engine-mac-arm64 \
-            --add-data "$ct2:ctranslate2" \
-            --add-data "$fw:faster_whisper" \
-            --add-data "$av_p:av" \
-            --add-data "$np_p:numpy" \
-            --collect-binaries ctranslate2 \
-            --collect-binaries av \
-            --hidden-import ctranslate2 \
-            --hidden-import faster_whisper \
-            --hidden-import faster_whisper.transcribe \
-            --hidden-import faster_whisper.audio \
-            --hidden-import faster_whisper.utils \
-            --hidden-import faster_whisper.tokenizer \
-            --hidden-import av \
-            --hidden-import torch \
-            faster_whisper_cli.py
-
-      - name: Smoke test
-        run: |
-          test -f "dist/zsub-engine-mac-arm64/zsub-engine-mac-arm64"
-          chmod +x "dist/zsub-engine-mac-arm64/zsub-engine-mac-arm64"
-          "dist/zsub-engine-mac-arm64/zsub-engine-mac-arm64" --help >/dev/null
-
-      - uses: actions/upload-artifact@v5
+      - name: Upload
+        uses: actions/upload-artifact@v4
         with:
-          name: zsub-engine-v${{ env.ZSUB_VERSION }}-mac-arm64
-          path: dist/zsub-engine-mac-arm64/
-          retention-days: 30
+          name: zsub-engine-mac-arm64
+          path: dist/mac/arm64/zsub-engine-mac-arm64/
+          retention-days: 7
 
-  # ═══════════════════════════════════════════
-  # macOS — Intel x64
-  # ═══════════════════════════════════════════
-  build-mac-intel:
-    name: macOS Intel x64
-    runs-on: macos-15-intel
+  # ──────────────────────────────────────────────────────────────
+
+  engine-mac-intel:
+    name: Engine · macOS Intel
+    runs-on: macos-13
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
+      - name: Install
         run: |
-          python -m pip install --upgrade pip wheel
-          python -m pip install "setuptools<82"
-          python -m pip install numpy==1.26.4
-          python -m pip install torch==2.2.2
-          python -m pip install ctranslate2==4.7.1 faster-whisper==1.2.1 av==17.0.0 requests==2.32.3
-          python -m pip install pyinstaller==6.11.1
-
-      - name: Verify imports
-        run: |
-          python -c "
-          import torch, ctranslate2, faster_whisper, av, numpy, platform
-          print('torch:', torch.__version__)
-          print('ctranslate2:', ctranslate2.__version__)
-          print('faster_whisper:', faster_whisper.__version__)
-          print('platform:', platform.machine())
-          "
+          python -m pip install --upgrade pip
+          pip install torch==2.8.0 torchaudio==2.8.0
+          pip install ctranslate2 faster-whisper
+          pip install pyinstaller>=6.0
 
       - name: Build
         run: |
-          ct2=$(python -c "import ctranslate2, os; print(os.path.dirname(ctranslate2.__file__))")
-          fw=$(python -c "import faster_whisper, os; print(os.path.dirname(faster_whisper.__file__))")
-          av_p=$(python -c "import av, os; print(os.path.dirname(av.__file__))")
-          np_p=$(python -c "import numpy, os; print(os.path.dirname(numpy.__file__))")
+          pyinstaller faster_whisper_cli.py \
+            --onedir \
+            --name zsub-engine-mac-intel \
+            --collect-all faster_whisper \
+            --collect-all ctranslate2 \
+            --collect-all tokenizers \
+            --noconfirm \
+            --distpath dist/mac/intel
 
-          pyinstaller --clean --noconfirm --onedir --name zsub-engine-mac-intel \
-            --add-data "$ct2:ctranslate2" \
-            --add-data "$fw:faster_whisper" \
-            --add-data "$av_p:av" \
-            --add-data "$np_p:numpy" \
-            --collect-binaries ctranslate2 \
-            --collect-binaries av \
-            --hidden-import ctranslate2 \
-            --hidden-import faster_whisper \
-            --hidden-import faster_whisper.transcribe \
-            --hidden-import faster_whisper.audio \
-            --hidden-import faster_whisper.utils \
-            --hidden-import faster_whisper.tokenizer \
-            --hidden-import av \
-            --hidden-import torch \
-            faster_whisper_cli.py
-
-      - name: Smoke test
-        run: |
-          test -f "dist/zsub-engine-mac-intel/zsub-engine-mac-intel"
-          chmod +x "dist/zsub-engine-mac-intel/zsub-engine-mac-intel"
-          "dist/zsub-engine-mac-intel/zsub-engine-mac-intel" --help >/dev/null
-
-      - uses: actions/upload-artifact@v5
+      - name: Upload
+        uses: actions/upload-artifact@v4
         with:
-          name: zsub-engine-v${{ env.ZSUB_VERSION }}-mac-intel-x64
-          path: dist/zsub-engine-mac-intel/
-          retention-days: 30
+          name: zsub-engine-mac-intel
+          path: dist/mac/intel/zsub-engine-mac-intel/
+          retention-days: 7
+
+  # ══════════════════════════════════════════════════════════════
+  # ZSUB FILLER — MMS forced alignment (dolgu sesi motoru)
+  # ══════════════════════════════════════════════════════════════
+
+  filler-win-cuda:
+    name: Filler · Windows CUDA
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
+          pip install transformers>=4.40.0 accelerate safetensors
+          pip install pyinstaller>=6.0
+
+      - name: Build
+        run: |
+          pyinstaller zsub_filler.py `
+            --onedir `
+            --name zsub-filler `
+            --collect-all torch `
+            --collect-all torchaudio `
+            --collect-all transformers `
+            --collect-all tokenizers `
+            --collect-all huggingface_hub `
+            --collect-all safetensors `
+            --hidden-import=torchaudio.functional `
+            --hidden-import=torchaudio.transforms `
+            --hidden-import=torchaudio.backend.soundfile_backend `
+            --hidden-import=transformers.models.wav2vec2 `
+            --hidden-import=transformers.models.wav2vec2.modeling_wav2vec2 `
+            --hidden-import=transformers.models.wav2vec2.processing_wav2vec2 `
+            --hidden-import=transformers.models.wav2vec2.feature_extraction_wav2vec2 `
+            --hidden-import=transformers.models.wav2vec2.tokenization_wav2vec2 `
+            --noconfirm `
+            --distpath dist\win\cuda
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: zsub-filler-win-cuda
+          path: dist\win\cuda\zsub-filler\
+          retention-days: 7
+
+  # ──────────────────────────────────────────────────────────────
+
+  filler-win-cpu:
+    name: Filler · Windows CPU
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cpu
+          pip install transformers>=4.40.0 accelerate safetensors
+          pip install pyinstaller>=6.0
+
+      - name: Build
+        run: |
+          pyinstaller zsub_filler.py `
+            --onedir `
+            --name zsub-filler-cpu `
+            --collect-all torch `
+            --collect-all torchaudio `
+            --collect-all transformers `
+            --collect-all tokenizers `
+            --collect-all huggingface_hub `
+            --collect-all safetensors `
+            --hidden-import=torchaudio.functional `
+            --hidden-import=torchaudio.transforms `
+            --hidden-import=torchaudio.backend.soundfile_backend `
+            --hidden-import=transformers.models.wav2vec2 `
+            --hidden-import=transformers.models.wav2vec2.modeling_wav2vec2 `
+            --hidden-import=transformers.models.wav2vec2.processing_wav2vec2 `
+            --hidden-import=transformers.models.wav2vec2.feature_extraction_wav2vec2 `
+            --hidden-import=transformers.models.wav2vec2.tokenization_wav2vec2 `
+            --noconfirm `
+            --distpath dist\win\cpu
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: zsub-filler-win-cpu
+          path: dist\win\cpu\zsub-filler-cpu\
+          retention-days: 7
+
+  # ──────────────────────────────────────────────────────────────
+
+  filler-mac-arm64:
+    name: Filler · macOS ARM64
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch==2.8.0 torchaudio==2.8.0
+          pip install transformers>=4.40.0 accelerate safetensors
+          pip install pyinstaller>=6.0
+
+      - name: Build
+        run: |
+          pyinstaller zsub_filler.py \
+            --onedir \
+            --name zsub-filler-mac-arm64 \
+            --collect-all torch \
+            --collect-all torchaudio \
+            --collect-all transformers \
+            --collect-all tokenizers \
+            --collect-all huggingface_hub \
+            --collect-all safetensors \
+            --hidden-import=torchaudio.functional \
+            --hidden-import=torchaudio.transforms \
+            --hidden-import=torchaudio.backend.soundfile_backend \
+            --hidden-import=transformers.models.wav2vec2 \
+            --hidden-import=transformers.models.wav2vec2.modeling_wav2vec2 \
+            --hidden-import=transformers.models.wav2vec2.processing_wav2vec2 \
+            --hidden-import=transformers.models.wav2vec2.feature_extraction_wav2vec2 \
+            --hidden-import=transformers.models.wav2vec2.tokenization_wav2vec2 \
+            --noconfirm \
+            --distpath dist/mac/arm64
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: zsub-filler-mac-arm64
+          path: dist/mac/arm64/zsub-filler-mac-arm64/
+          retention-days: 7
+
+  # ──────────────────────────────────────────────────────────────
+
+  filler-mac-intel:
+    name: Filler · macOS Intel
+    runs-on: macos-13
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch==2.8.0 torchaudio==2.8.0
+          pip install transformers>=4.40.0 accelerate safetensors
+          pip install pyinstaller>=6.0
+
+      - name: Build
+        run: |
+          pyinstaller zsub_filler.py \
+            --onedir \
+            --name zsub-filler-mac-intel \
+            --collect-all torch \
+            --collect-all torchaudio \
+            --collect-all transformers \
+            --collect-all tokenizers \
+            --collect-all huggingface_hub \
+            --collect-all safetensors \
+            --hidden-import=torchaudio.functional \
+            --hidden-import=torchaudio.transforms \
+            --hidden-import=torchaudio.backend.soundfile_backend \
+            --hidden-import=transformers.models.wav2vec2 \
+            --hidden-import=transformers.models.wav2vec2.modeling_wav2vec2 \
+            --hidden-import=transformers.models.wav2vec2.processing_wav2vec2 \
+            --hidden-import=transformers.models.wav2vec2.feature_extraction_wav2vec2 \
+            --hidden-import=transformers.models.wav2vec2.tokenization_wav2vec2 \
+            --noconfirm \
+            --distpath dist/mac/intel
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: zsub-filler-mac-intel
+          path: dist/mac/intel/zsub-filler-mac-intel/
+          retention-days: 7
