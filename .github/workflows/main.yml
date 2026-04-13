@@ -28,6 +28,29 @@ jobs:
           pip install ctranslate2 faster-whisper
           pip install pyinstaller>=6.0
 
+      - name: Gereksiz torch dosyalarini sil
+        run: |
+          python -c "
+          import os, shutil, glob, sys
+          site = next(p for p in sys.path if 'site-packages' in p)
+          torch_dir = os.path.join(site, 'torch')
+          targets = [
+              os.path.join(torch_dir, 'test'),
+              os.path.join(torch_dir, 'share', 'cmake'),
+              os.path.join(torch_dir, 'include'),
+          ]
+          for lib in glob.glob(os.path.join(torch_dir, 'lib', '*xpu*')): targets.append(lib)
+          for lib in glob.glob(os.path.join(torch_dir, 'lib', '*rocm*')): targets.append(lib)
+          for lib in glob.glob(os.path.join(torch_dir, 'lib', '*hip*')): targets.append(lib)
+          total = 0
+          for p in targets:
+              if os.path.exists(p):
+                  size = sum(os.path.getsize(f) for f in glob.glob(p+'/**', recursive=True) if os.path.isfile(f))
+                  total += size
+                  shutil.rmtree(p, ignore_errors=True) if os.path.isdir(p) else os.remove(p)
+          print(f'Silindi: {total/1024/1024:.0f} MB')
+          "
+
       - name: Build
         run: |
           pyinstaller faster_whisper_cli.py `
@@ -36,9 +59,16 @@ jobs:
             --collect-all faster_whisper `
             --collect-all ctranslate2 `
             --collect-all tokenizers `
-            --collect-all torch `
+            --collect-submodules torch `
             --hidden-import=torch `
             --hidden-import=torch.cuda `
+            --exclude-module=torch.distributed `
+            --exclude-module=torch.fx `
+            --exclude-module=torch.onnx `
+            --exclude-module=torch.ao `
+            --exclude-module=torch.testing `
+            --exclude-module=torchvision `
+            --exclude-module=torchaudio `
             --noconfirm `
             --distpath dist\win\cuda
 
@@ -64,7 +94,7 @@ jobs:
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          pip install torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cpu
+          pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu
           pip install ctranslate2 faster-whisper
           pip install pyinstaller>=6.0
 
@@ -76,6 +106,13 @@ jobs:
             --collect-all faster_whisper `
             --collect-all ctranslate2 `
             --collect-all tokenizers `
+            --hidden-import=torch `
+            --exclude-module=torch.cuda `
+            --exclude-module=torch.distributed `
+            --exclude-module=torch.fx `
+            --exclude-module=torch.onnx `
+            --exclude-module=torchvision `
+            --exclude-module=torchaudio `
             --noconfirm `
             --distpath dist\win\cpu
 
@@ -101,7 +138,7 @@ jobs:
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          pip install torch==2.8.0 torchaudio==2.8.0
+          pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu
           pip install ctranslate2 faster-whisper
           pip install pyinstaller>=6.0
 
@@ -113,6 +150,11 @@ jobs:
             --collect-all faster_whisper \
             --collect-all ctranslate2 \
             --collect-all tokenizers \
+            --hidden-import=torch \
+            --exclude-module=torch.cuda \
+            --exclude-module=torch.distributed \
+            --exclude-module=torch.fx \
+            --exclude-module=torch.onnx \
             --noconfirm \
             --distpath dist/mac/arm64
 
@@ -138,7 +180,7 @@ jobs:
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          pip install torch==2.8.0 torchaudio==2.8.0
+          pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu
           pip install ctranslate2 faster-whisper
           pip install pyinstaller>=6.0
 
@@ -150,6 +192,11 @@ jobs:
             --collect-all faster_whisper \
             --collect-all ctranslate2 \
             --collect-all tokenizers \
+            --hidden-import=torch \
+            --exclude-module=torch.cuda \
+            --exclude-module=torch.distributed \
+            --exclude-module=torch.fx \
+            --exclude-module=torch.onnx \
             --noconfirm \
             --distpath dist/mac/intel
 
@@ -178,28 +225,57 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
-          pip install transformers>=4.40.0 accelerate safetensors
+          pip install transformers>=4.40.0 safetensors
           pip install pyinstaller>=6.0
+
+      - name: Gereksiz torch dosyalarini sil
+        run: |
+          python -c "
+          import os, shutil, glob, sys
+          site = next(p for p in sys.path if 'site-packages' in p)
+          torch_dir = os.path.join(site, 'torch')
+          targets = [
+              os.path.join(torch_dir, 'test'),
+              os.path.join(torch_dir, 'share', 'cmake'),
+              os.path.join(torch_dir, 'include'),
+          ]
+          for lib in glob.glob(os.path.join(torch_dir, 'lib', '*xpu*')): targets.append(lib)
+          for lib in glob.glob(os.path.join(torch_dir, 'lib', '*rocm*')): targets.append(lib)
+          for lib in glob.glob(os.path.join(torch_dir, 'lib', '*hip*')): targets.append(lib)
+          total = 0
+          for p in targets:
+              if os.path.exists(p):
+                  size = sum(os.path.getsize(f) for f in glob.glob(p+'/**', recursive=True) if os.path.isfile(f))
+                  total += size
+                  shutil.rmtree(p, ignore_errors=True) if os.path.isdir(p) else os.remove(p)
+          print(f'Silindi: {total/1024/1024:.0f} MB')
+          "
 
       - name: Build
         run: |
           pyinstaller zsub_filler.py `
             --onedir `
             --name zsub-filler `
-            --collect-all torch `
+            --collect-submodules torch `
             --collect-all torchaudio `
             --collect-all transformers `
             --collect-all tokenizers `
-            --collect-all huggingface_hub `
             --collect-all safetensors `
+            --hidden-import=torch `
+            --hidden-import=torch.cuda `
             --hidden-import=torchaudio.functional `
             --hidden-import=torchaudio.transforms `
-            --hidden-import=torchaudio.backend.soundfile_backend `
             --hidden-import=transformers.models.wav2vec2 `
             --hidden-import=transformers.models.wav2vec2.modeling_wav2vec2 `
             --hidden-import=transformers.models.wav2vec2.processing_wav2vec2 `
             --hidden-import=transformers.models.wav2vec2.feature_extraction_wav2vec2 `
             --hidden-import=transformers.models.wav2vec2.tokenization_wav2vec2 `
+            --exclude-module=torch.distributed `
+            --exclude-module=torch.fx `
+            --exclude-module=torch.onnx `
+            --exclude-module=torch.ao `
+            --exclude-module=torch.testing `
+            --exclude-module=torchvision `
             --noconfirm `
             --distpath dist\win\cuda
 
@@ -226,7 +302,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cpu
-          pip install transformers>=4.40.0 accelerate safetensors
+          pip install transformers>=4.40.0 safetensors
           pip install pyinstaller>=6.0
 
       - name: Build
@@ -234,20 +310,24 @@ jobs:
           pyinstaller zsub_filler.py `
             --onedir `
             --name zsub-filler-cpu `
-            --collect-all torch `
+            --collect-submodules torch `
             --collect-all torchaudio `
             --collect-all transformers `
             --collect-all tokenizers `
-            --collect-all huggingface_hub `
             --collect-all safetensors `
+            --hidden-import=torch `
             --hidden-import=torchaudio.functional `
             --hidden-import=torchaudio.transforms `
-            --hidden-import=torchaudio.backend.soundfile_backend `
             --hidden-import=transformers.models.wav2vec2 `
             --hidden-import=transformers.models.wav2vec2.modeling_wav2vec2 `
             --hidden-import=transformers.models.wav2vec2.processing_wav2vec2 `
             --hidden-import=transformers.models.wav2vec2.feature_extraction_wav2vec2 `
             --hidden-import=transformers.models.wav2vec2.tokenization_wav2vec2 `
+            --exclude-module=torch.cuda `
+            --exclude-module=torch.distributed `
+            --exclude-module=torch.fx `
+            --exclude-module=torch.onnx `
+            --exclude-module=torchvision `
             --noconfirm `
             --distpath dist\win\cpu
 
@@ -274,7 +354,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install torch==2.8.0 torchaudio==2.8.0
-          pip install transformers>=4.40.0 accelerate safetensors
+          pip install transformers>=4.40.0 safetensors
           pip install pyinstaller>=6.0
 
       - name: Build
@@ -282,20 +362,22 @@ jobs:
           pyinstaller zsub_filler.py \
             --onedir \
             --name zsub-filler-mac-arm64 \
-            --collect-all torch \
+            --collect-submodules torch \
             --collect-all torchaudio \
             --collect-all transformers \
             --collect-all tokenizers \
-            --collect-all huggingface_hub \
             --collect-all safetensors \
+            --hidden-import=torch \
             --hidden-import=torchaudio.functional \
             --hidden-import=torchaudio.transforms \
-            --hidden-import=torchaudio.backend.soundfile_backend \
             --hidden-import=transformers.models.wav2vec2 \
             --hidden-import=transformers.models.wav2vec2.modeling_wav2vec2 \
             --hidden-import=transformers.models.wav2vec2.processing_wav2vec2 \
             --hidden-import=transformers.models.wav2vec2.feature_extraction_wav2vec2 \
             --hidden-import=transformers.models.wav2vec2.tokenization_wav2vec2 \
+            --exclude-module=torch.distributed \
+            --exclude-module=torch.fx \
+            --exclude-module=torch.onnx \
             --noconfirm \
             --distpath dist/mac/arm64
 
@@ -322,7 +404,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install torch==2.8.0 torchaudio==2.8.0
-          pip install transformers>=4.40.0 accelerate safetensors
+          pip install transformers>=4.40.0 safetensors
           pip install pyinstaller>=6.0
 
       - name: Build
@@ -330,20 +412,22 @@ jobs:
           pyinstaller zsub_filler.py \
             --onedir \
             --name zsub-filler-mac-intel \
-            --collect-all torch \
+            --collect-submodules torch \
             --collect-all torchaudio \
             --collect-all transformers \
             --collect-all tokenizers \
-            --collect-all huggingface_hub \
             --collect-all safetensors \
+            --hidden-import=torch \
             --hidden-import=torchaudio.functional \
             --hidden-import=torchaudio.transforms \
-            --hidden-import=torchaudio.backend.soundfile_backend \
             --hidden-import=transformers.models.wav2vec2 \
             --hidden-import=transformers.models.wav2vec2.modeling_wav2vec2 \
             --hidden-import=transformers.models.wav2vec2.processing_wav2vec2 \
             --hidden-import=transformers.models.wav2vec2.feature_extraction_wav2vec2 \
             --hidden-import=transformers.models.wav2vec2.tokenization_wav2vec2 \
+            --exclude-module=torch.distributed \
+            --exclude-module=torch.fx \
+            --exclude-module=torch.onnx \
             --noconfirm \
             --distpath dist/mac/intel
 
